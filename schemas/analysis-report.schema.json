@@ -1,0 +1,3 @@
+{
+ "$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://tracehelix.local/schemas/analysis-report.schema.json","title":"TraceHelix analysis report v1","type":"object","required":["schemaVersion","generatedAt","run","analysis","disclaimer","contentIdentitySha256"],"properties":{"schemaVersion":{"const":"1.0"},"generatedAt":{"type":"string","format":"date-time"},"run":{"type":"object","required":["id","inputSha256","adapter","adapterVersion","events"]},"analysis":{"type":"object","required":["id","status","classifierId","classifierVersion","classifications","alerts","contentSha256"]},"disclaimer":{"type":"string","pattern":"not causal proof"},"contentIdentitySha256":{"type":"string","pattern":"^[a-f0-9]{64}$"}}
+}

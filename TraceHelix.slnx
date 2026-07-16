@@ -1,0 +1,17 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TraceHelix.Api/TraceHelix.Api.csproj" />
+    <Project Path="src/TraceHelix.Application/TraceHelix.Application.csproj" />
+    <Project Path="src/TraceHelix.Cli/TraceHelix.Cli.csproj" />
+    <Project Path="src/TraceHelix.Domain/TraceHelix.Domain.csproj" />
+    <Project Path="src/TraceHelix.Infrastructure/TraceHelix.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TraceHelix.Api.Tests/TraceHelix.Api.Tests.csproj" />
+    <Project Path="tests/TraceHelix.Application.Tests/TraceHelix.Application.Tests.csproj" />
+    <Project Path="tests/TraceHelix.Cli.Tests/TraceHelix.Cli.Tests.csproj" />
+    <Project Path="tests/TraceHelix.Domain.Tests/TraceHelix.Domain.Tests.csproj" />
+    <Project Path="tests/TraceHelix.Infrastructure.Tests/TraceHelix.Infrastructure.Tests.csproj" />
+    <Project Path="tests/TraceHelix.IntegrationTests/TraceHelix.IntegrationTests.csproj" />
+  </Folder>
+</Solution>

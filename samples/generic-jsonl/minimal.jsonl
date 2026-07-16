@@ -1,0 +1,12 @@
+{"timestamp":"2026-07-16T19:00:00Z","kind":"ToolCall","actor":"agent","summary":"search repository","payload":{"tool":"search","query":"TODO"}}
+{"timestamp":"2026-07-16T19:00:00Z","kind":"ToolCall","actor":"agent","summary":"search repository","payload":{"tool":"search","query":"TODO"}}
+{"timestamp":"2026-07-16T19:00:00Z","kind":"ToolCall","actor":"agent","summary":"search repository","payload":{"tool":"search","query":"TODO"}}
+{"timestamp":"2026-07-16T19:00:03Z","kind":"Reasoning","actor":"agent","summary":"plan checklist","payload":{"text":"plan checklist"}}
+{"timestamp":"2026-07-16T19:00:04Z","kind":"Reasoning","actor":"agent","summary":"plan checklist","payload":{"text":"plan checklist"}}
+{"timestamp":"2026-07-16T19:00:05Z","kind":"Reasoning","actor":"agent","summary":"plan checklist","payload":{"text":"plan checklist"}}
+{"timestamp":"2026-07-16T19:00:06Z","kind":"FileChange","actor":"agent","summary":"apply patch","payload":{"path":"src/app.cs","operation":"write"}}
+{"timestamp":"2026-07-16T19:00:07Z","kind":"Status","actor":"agent","summary":"success complete","payload":{"status":"success"}}
+{"timestamp":"2026-07-16T19:00:08Z","kind":"Error","actor":"tool","summary":"retry after failure","payload":{"tool":"build","exitCode":1}}
+{"timestamp":"2026-07-16T19:00:09Z","kind":"Error","actor":"tool","summary":"retry after failure","payload":{"tool":"build","exitCode":1}}
+{"timestamp":"2026-07-16T19:00:10Z","kind":"Error","actor":"tool","summary":"retry after failure","payload":{"tool":"build","exitCode":1}}
+{"timestamp":"2026-07-16T19:00:11Z","kind":"Status","actor":"agent","summary":"success complete","payload":{"status":"success"}}
