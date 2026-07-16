@@ -24,6 +24,7 @@ public sealed class SqliteStore : ITraceRepository, IAnalysisRepository
         {
             DataSource = fullPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
+            Pooling = false,
         }.ToString();
         Initialize();
     }
