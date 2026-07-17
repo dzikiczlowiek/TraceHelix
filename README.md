@@ -1,6 +1,6 @@
 # TraceHelix
 
-TraceHelix is a local, auditable CLI-first analyzer for AI-agent execution traces. This verified slice imports generic JSONL into SQLite, applies deterministic step labels and six evidence-linked sequence detectors, compares runs, and exports JSON or self-contained HTML reports. It makes no causal claims.
+TraceHelix is a local, auditable analyzer for AI-agent execution traces. It imports generic JSONL into SQLite, applies deterministic step labels and evidence-linked detectors, compares runs, and exposes a loopback-only read-oriented v1 API and accessible React run browser. It makes no causal claims.
 
 ## Prerequisites
 
@@ -20,6 +20,8 @@ npm --prefix web run lint
 npm --prefix web run typecheck
 npm --prefix web run test -- --run
 npm --prefix web run build
+npm --prefix web audit --audit-level=high
+make verify-api
 uv sync --project training --locked
 uv run --project training ruff check training
 uv run --project training mypy training/src
@@ -47,4 +49,10 @@ Or run `TRACEHELIX_VERIFY_DIR=/tmp/tracehelix-verification make verify-e2e`. Mac
 
 Generic JSONL imports default to limits of 256 MiB total input, 1 MiB per record, 100,000 events, and 100,000 nonblank records. Every nonblank record consumes the record budget whether valid or malformed, bounding retained diagnostics. Cancellation is covered with pre-cancelled real operations and detector tests; real-process OS Ctrl+C timing remains a follow-up.
 
-The web and Python directories are intentionally buildable shells only. This slice does not implement an API product, UI features, model preparation/training, ONNX, or live-AI evaluation.
+## Local API and web browser
+
+Set `TRACEHELIX_DB` to a CLI-created database and run `dotnet run --project src/TraceHelix.Api`. The default listener is `http://127.0.0.1:5080`; the API provides health, run list/detail, sequence-paged events (maximum 200), latest analysis/alerts, rules analysis, and independent comparison under `/api/v1`. Development exposes the generated contract at `/openapi/v1.json`. Regenerate both committed artifacts from endpoint metadata with `cd web && npm run generate:api`; verify they were already current with `cd web && npm run check:api`. `web/src/api.ts` consumes the generated schema types in `web/src/api/generated.ts`.
+
+Run `npm --prefix web run dev`; Vite binds to loopback and proxies API requests. Deep links support `/runs/{id}` and `/compare?left={id}&right={id}`. The UI displays raw counts and denominators and does not assert causal proof.
+
+Deferred intentionally: import upload, source-file/source viewer endpoints, arbitrary file access, sequence zoom/alignment, browser Playwright, ML/training, ONNX, and live AI.

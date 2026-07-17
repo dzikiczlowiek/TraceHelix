@@ -1,1 +1,40 @@
-{"name":"tracehelix-web","private":true,"version":"0.1.0","type":"module","scripts":{"dev":"vite","lint":"eslint .","typecheck":"tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.node.json --noEmit","test":"vitest run","build":"tsc -b && vite build"},"dependencies":{"@vitejs/plugin-react":"latest","vite":"latest","typescript":"latest","react":"latest","react-dom":"latest"},"devDependencies":{"@eslint/js":"latest","@types/react":"latest","@types/react-dom":"latest","eslint":"latest","eslint-plugin-react-hooks":"latest","eslint-plugin-react-refresh":"latest","globals":"latest","typescript-eslint":"latest","vitest":"latest"}}
+{
+  "name": "tracehelix-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "test": "vitest run",
+    "build": "tsc -b && vite build",
+    "generate:api": "dotnet restore ../src/TraceHelix.Api/TraceHelix.Api.csproj --locked-mode && dotnet build ../src/TraceHelix.Api/TraceHelix.Api.csproj -c Release --no-restore && openapi-typescript ../src/TraceHelix.Api/openapi/v1.json -o src/api/generated.ts",
+    "check:api": "node scripts/check-api.mjs"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.101.2",
+    "@vitejs/plugin-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@eslint/js": "latest",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "eslint": "latest",
+    "eslint-plugin-react-hooks": "latest",
+    "eslint-plugin-react-refresh": "latest",
+    "globals": "latest",
+    "jsdom": "^29.1.1",
+    "msw": "^2.15.0",
+    "openapi-typescript": "7.10.1",
+    "typescript-eslint": "latest",
+    "vitest": "latest"
+  }
+}

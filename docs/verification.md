@@ -27,7 +27,8 @@ CI runs on pushes to `main` and on every pull request. The equivalent local gate
 |---|---|---|
 | .NET | Locked restore, format verification, Release build, and tests on Ubuntu and Windows | `dotnet restore TraceHelix.slnx --locked-mode && dotnet format TraceHelix.slnx --verify-no-changes --no-restore && dotnet build TraceHelix.slnx -c Release --no-restore && dotnet test TraceHelix.slnx -c Release --no-build --no-restore` |
 | Real-process E2E | Ubuntu Release build followed by the committed shell verifier | `make verify-e2e` (after the Release build above) |
-| Web | Locked install, ESLint, TypeScript checks, Vitest, production build, and high-severity dependency audit | `cd web && npm ci && npm run lint && npm run typecheck && npm exec -- vitest run && npm run build && npm audit --audit-level=high` |
+| Web | Locked install, generated OpenAPI contract gate, ESLint, TypeScript checks, Vitest/jsdom, production build, and high-severity dependency audit | `cd web && npm ci && npm run check:api && npm run lint && npm run typecheck && npm test && npm run build && npm audit --audit-level=high` |
+| API process | Production API over loopback with readiness, pagination, ProblemDetails, analysis, alerts, and compare | `make verify-api` |
 | Python training | Locked uv environment, Ruff, strict mypy, and pytest | `cd training && uv sync --locked && uv run ruff check . && uv run mypy . && uv run pytest` |
 
 All fixtures and classifiers exercised by these gates are deterministic and offline. CI requires no secrets and makes no live AI or network model calls; network access is used only to install locked tool and package dependencies.
