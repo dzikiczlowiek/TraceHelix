@@ -1,0 +1,11 @@
+{
+  "version": "redaction-v1",
+  "limits": {
+    "max_depth": 32,
+    "max_nodes": 100000,
+    "max_string_chars": 1000000,
+    "max_input_bytes": 10000000
+  },
+  "literal_secrets": [],
+  "patterns": []
+}

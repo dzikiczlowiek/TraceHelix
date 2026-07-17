@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any, Literal, TypeAlias, cast
@@ -22,7 +23,17 @@ from pydantic import (
     ConfigDict,
     Field,
     PlainSerializer,
+    ValidationError,
     model_validator,
+)
+
+from tracehelix_training._canonical import canonical_json_value_bytes
+from tracehelix_training.redact import (
+    RedactionConfig,
+    RedactionError,
+    RedactionReport,
+    load_default_config,
+    redact,
 )
 
 SHA256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -395,9 +406,7 @@ class DatasetManifest(ContractModel):
 def canonical_json_bytes(value: BaseModel | Any) -> bytes:
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json")
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    ).encode()
+    return canonical_json_value_bytes(value)
 
 
 def candidate_identity(content_without_id: Any) -> str:
@@ -414,13 +423,98 @@ def manifest_identity(content_without_id: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(content_without_id)).hexdigest()
 
 
+@dataclass(frozen=True)
+class _CandidateGateFailure:
+    error: Exception
+
+
+def _safe_candidate_validation_error() -> ValidationError:
+    """Build a Pydantic-compatible error that contains no rejected input."""
+
+    return ValidationError.from_exception_data(
+        "_CandidateContent",
+        [
+            {
+                "type": "value_error",
+                "loc": (),
+                "input": None,
+                "ctx": {"error": ValueError("candidate validation failed")},
+            }
+        ],
+    )
+
+
+def _valid_redaction_report(
+    report: RedactionReport,
+    config: RedactionConfig,
+    expected_input: dict[str, Any],
+    expected_output: dict[str, Any],
+) -> bool:
+    try:
+        return (
+            report.secret_scan_passed
+            and report.version == config.version
+            and report.config_hash == config.config_hash
+            and report.input_hash == candidate_identity(expected_input)
+            and report.output_hash == candidate_identity(expected_output)
+        )
+    except Exception:
+        return False
+
+
+def _construct_candidate_result(
+    content: dict[str, Any],
+) -> TrainingCandidate | _CandidateGateFailure:
+    """Complete the privacy gate without propagating input-bearing tracebacks."""
+
+    try:
+        config = load_default_config()
+        redacted, report = redact(content, config)
+    except RedactionError as error:
+        return _CandidateGateFailure(type(error)(str(error)))
+    except Exception:
+        return _CandidateGateFailure(ValueError("candidate redaction gate failed"))
+    if (
+        not isinstance(redacted, dict)
+        or not _valid_redaction_report(report, config, content, redacted)
+        or redacted.get("redaction_version") != config.version
+    ):
+        return _CandidateGateFailure(ValueError("candidate redaction gate failed"))
+    try:
+        normalized = _normalized_candidate_content(redacted)
+    except Exception:
+        return _CandidateGateFailure(_safe_candidate_validation_error())
+    try:
+        final_payload, final_report = redact(normalized, config)
+    except RedactionError as error:
+        return _CandidateGateFailure(type(error)(str(error)))
+    except Exception:
+        return _CandidateGateFailure(ValueError("candidate redaction gate failed"))
+    if (
+        not isinstance(final_payload, dict)
+        or final_payload != normalized
+        or not _valid_redaction_report(final_report, config, normalized, final_payload)
+    ):
+        return _CandidateGateFailure(ValueError("candidate redaction gate failed"))
+    try:
+        return TrainingCandidate.model_validate(
+            {"example_id": candidate_identity(final_payload), **final_payload}
+        )
+    except Exception:
+        return _CandidateGateFailure(_safe_candidate_validation_error())
+
+
 def construct_candidate(**content: Any) -> TrainingCandidate:
+    """Apply and verify the packaged policy over raw and exact normalized content."""
     content = dict(content)
     content.pop("example_id", None)
-    normalized = _normalized_candidate_content(content)
-    return TrainingCandidate.model_validate(
-        {"example_id": candidate_identity(normalized), **normalized}
-    )
+    gate_result = _construct_candidate_result(content)
+    del content
+    if isinstance(gate_result, _CandidateGateFailure):
+        error = gate_result.error
+        del gate_result
+        raise error from None
+    return gate_result
 
 
 def _invariants(validator: Any, enabled: bool, instance: Any, schema: Any) -> Any:

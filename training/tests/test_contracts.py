@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import traceback as traceback_module
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -23,6 +25,8 @@ from tracehelix_training.contracts import (
     generate_schemas,
     manifest_identity,
 )
+from tracehelix_training.redact import ScanFailedError, load_default_config, redact
+from traceback_privacy import is_tracehelix_training_frame
 
 ROOT = Path(__file__).parents[2]
 SCHEMAS = ROOT / "schemas"
@@ -63,7 +67,7 @@ def candidate_content() -> dict[str, Any]:
         "source_hash": HASH,
         "adapter": "tracehelix",
         "adapter_version": "1.0.0",
-        "redaction_version": "redact-v1",
+        "redaction_version": "redaction-v1",
         "license_or_consent": "generated fixture",
     }
 
@@ -252,6 +256,172 @@ def test_construct_candidate_is_repeatable() -> None:
     assert construct_candidate(**candidate_content()) == construct_candidate(**candidate_content())
 
 
+def test_construct_candidate_redacts_current_and_context_content_before_identity() -> None:
+    content = candidate_content()
+    top_secret = "Bearer synthetic-current-token"
+    before_secret = "APP_PASSWORD='two words'"
+    after_secret = "person@[2001:db8::1]"
+    content["event_text"] = top_secret
+    content["context_before"][0]["event_text"] = before_secret
+    content["context_after"][0]["event_text"] = after_secret
+
+    first = construct_candidate(**content)
+    second = construct_candidate(**content)
+    encoded = canonical_json_bytes(first).decode()
+    assert all(secret not in encoded for secret in [top_secret, "two words", after_secret])
+    assert "<REDACTED:AUTH:1>" in first.event_text
+    assert "<REDACTED:ENV_SECRET:1>" in first.context_before[0].event_text
+    assert "<REDACTED:EMAIL:1>" in first.context_after[0].event_text
+    assert first == second
+    assert first.example_id == candidate_identity(
+        first.model_dump(mode="json", exclude={"example_id"})
+    )
+
+
+def test_construct_candidate_rejects_version_mismatch_and_report_injection() -> None:
+    mismatched = candidate_content()
+    mismatched["redaction_version"] = "arbitrary-caller-version"
+    with pytest.raises(ValueError, match="candidate redaction gate failed"):
+        construct_candidate(**mismatched)
+
+    injected_reports = [
+        {
+            "secret_scan_passed": True,
+            "version": "redaction-v1",
+            "config_hash": HASH,
+            "input_hash": HASH,
+            "output_hash": HASH,
+        },
+        {
+            "secret_scan_passed": False,
+            "version": "redaction-v1",
+            "config_hash": OTHER_HASH,
+            "input_hash": OTHER_HASH,
+            "output_hash": OTHER_HASH,
+        },
+    ]
+    for injected_report in injected_reports:
+        forged = candidate_content()
+        forged["redaction_report"] = injected_report
+        with pytest.raises(ValidationError):
+            construct_candidate(**forged)
+
+    failed_scan = candidate_content()
+    scan_canary = "candidate-failed-scan-private-canary"
+    failed_scan["event_text"] = "APP_PASSWORD=" + scan_canary + "x" * 4097
+    with pytest.raises(ScanFailedError) as caught:
+        construct_candidate(**failed_scan)
+    traceback = caught.value.__traceback__
+    while traceback is not None:
+        if is_tracehelix_training_frame(traceback.tb_frame.f_code.co_filename):
+            assert all(
+                scan_canary not in repr(value) for value in traceback.tb_frame.f_locals.values()
+            )
+        traceback = traceback.tb_next
+
+
+def test_construct_candidate_binds_a_second_redaction_report_to_the_exact_final_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = candidate_content()
+    content.pop("tool_name")
+    content["context_before"][0].pop("tool_name")
+    calls: list[Any] = []
+    real_redact = redact
+
+    def recording_redact(value: Any, config: Any) -> Any:
+        calls.append(value)
+        return real_redact(value, config)
+
+    monkeypatch.setattr("tracehelix_training.contracts.redact", recording_redact)
+    result = construct_candidate(**content)
+    final_payload = result.model_dump(mode="json", exclude={"example_id"})
+
+    assert len(calls) == 2
+    assert calls[1] == final_payload
+    assert calls[1]["tool_name"] is None
+    assert calls[1]["context_before"][0]["tool_name"] is None
+    assert result.example_id == candidate_identity(calls[1])
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("secret_scan_passed", False),
+        ("version", "redaction-v999"),
+        ("config_hash", OTHER_HASH),
+        ("input_hash", OTHER_HASH),
+        ("output_hash", OTHER_HASH),
+    ],
+)
+@pytest.mark.parametrize("call_to_tamper", [1, 2])
+def test_construct_candidate_rejects_mismatched_redaction_report(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    bad_value: Any,
+    call_to_tamper: int,
+) -> None:
+    call_count = 0
+    real_redact = redact
+
+    def tampered_redact(value: Any, config: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        output, report = real_redact(value, config)
+        if call_count == call_to_tamper:
+            report = replace(report, **{field: bad_value})
+        return output, report
+
+    monkeypatch.setattr("tracehelix_training.contracts.redact", tampered_redact)
+    with pytest.raises(ValueError, match="candidate redaction gate failed"):
+        construct_candidate(**candidate_content())
+
+
+def test_construct_candidate_rejects_non_idempotent_second_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call_count = 0
+    real_redact = redact
+
+    def tampered_redact(value: Any, config: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        output, report = real_redact(value, config)
+        if call_count == 2:
+            assert isinstance(output, dict)
+            output = {**output, "run_id": "tampered-after-normalization"}
+            report = replace(report, output_hash=candidate_identity(output))
+        return output, report
+
+    monkeypatch.setattr("tracehelix_training.contracts.redact", tampered_redact)
+    with pytest.raises(ValueError, match="candidate redaction gate failed"):
+        construct_candidate(**candidate_content())
+
+
+def test_construct_candidate_validation_failure_leaks_no_traceback_canary() -> None:
+    canary = "TRACEBACK_PRIVATE_CANARY_7f41"
+    invalid = candidate_content()
+    invalid["run_id"] = canary
+    invalid["unexpected"] = True
+
+    with pytest.raises(Exception) as caught:
+        construct_candidate(**invalid)
+
+    error: BaseException | None = caught.value
+    while error is not None:
+        assert canary not in str(error)
+        assert canary not in repr(error)
+        assert canary not in "".join(traceback_module.format_exception(error))
+        traceback = error.__traceback__
+        while traceback is not None:
+            if is_tracehelix_training_frame(traceback.tb_frame.f_code.co_filename):
+                assert all(
+                    canary not in repr(value) for value in traceback.tb_frame.f_locals.values()
+                )
+            traceback = traceback.tb_next
+        error = error.__cause__ or error.__context__
+
+
 @pytest.mark.parametrize(
     ("omit_top_level", "omit_context"), [(True, False), (False, True), (True, True)]
 )
@@ -307,6 +477,44 @@ def test_training_example_identity_excludes_all_label_fields() -> None:
     value = example()
     value.update(label="Plan", confidence=0.1, observable_reason="Another supported label.")
     assert TrainingExample.model_validate(value).example_id == candidate()["example_id"]
+
+
+@pytest.mark.parametrize(
+    ("model", "name", "factory"),
+    [
+        (TrainingCandidate, "training-candidate", candidate),
+        (TrainingExample, "training-example", example),
+    ],
+)
+def test_candidate_contracts_accept_any_nonempty_redaction_version(
+    model: type[BaseModel], name: str, factory: Callable[[], dict[str, Any]]
+) -> None:
+    value = factory()
+    value["redaction_version"] = "legacy-compatible-policy"
+    identity_content = {
+        key: item
+        for key, item in value.items()
+        if key in TrainingCandidate.model_fields and key != "example_id"
+    }
+    value["example_id"] = candidate_identity(identity_content)
+
+    model.model_validate(value)
+    Draft202012Validator(schema(name)).validate(value)
+    generated = model.model_json_schema(mode="serialization")
+    redaction_schema = generated["properties"]["redaction_version"]
+    assert redaction_schema["minLength"] == 1
+    assert "const" not in redaction_schema
+
+
+@pytest.mark.parametrize("bad_version", ["", "legacy-compatible-policy"])
+def test_construct_candidate_export_gate_requires_packaged_redaction_version(
+    bad_version: str,
+) -> None:
+    mismatched = candidate_content()
+    mismatched["redaction_version"] = bad_version
+    assert load_default_config().version != mismatched["redaction_version"]
+    with pytest.raises(ValueError, match="candidate redaction gate failed"):
+        construct_candidate(**mismatched)
 
 
 def quarantined() -> dict[str, Any]:
