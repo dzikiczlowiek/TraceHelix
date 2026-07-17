@@ -1,0 +1,231 @@
+{
+  "$comment": "TraceHelix contract_validator is REQUIRED for relational identity/count/provenance invariants.",
+  "$defs": {
+    "ManifestFile": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_size": {
+          "minimum": 0,
+          "title": "Byte Size",
+          "type": "integer"
+        },
+        "path": {
+          "minLength": 1,
+          "pattern": "^[^/\\\\:\\x00-\\x1f\\x7f-\\x9f]*[^/\\\\:\\x00-\\x1f\\x7f-\\x9f. ](?:/[^/\\\\:\\x00-\\x1f\\x7f-\\x9f]*[^/\\\\:\\x00-\\x1f\\x7f-\\x9f. ])*$",
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "byte_size"
+      ],
+      "title": "ManifestFile",
+      "type": "object"
+    }
+  },
+  "$id": "https://tracehelix.dev/schemas/dataset-manifest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "accepted_count": {
+      "minimum": 0,
+      "title": "Accepted Count",
+      "type": "integer"
+    },
+    "class_counts": {
+      "additionalProperties": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "propertyNames": {
+        "enum": [
+          "Explore",
+          "Plan",
+          "Execute",
+          "Verify",
+          "Recover",
+          "Unknown"
+        ]
+      },
+      "title": "Class Counts",
+      "type": "object"
+    },
+    "completed_count": {
+      "minimum": 0,
+      "title": "Completed Count",
+      "type": "integer"
+    },
+    "config_version": {
+      "minLength": 1,
+      "title": "Config Version",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "files": {
+      "items": {
+        "$ref": "#/$defs/ManifestFile"
+      },
+      "minItems": 1,
+      "title": "Files",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "manifest_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Id",
+      "type": "string"
+    },
+    "prompt_version": {
+      "minLength": 1,
+      "title": "Prompt Version",
+      "type": "string"
+    },
+    "quarantined_count": {
+      "minimum": 0,
+      "title": "Quarantined Count",
+      "type": "integer"
+    },
+    "quarantined_source_counts": {
+      "additionalProperties": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "propertyNames": {
+        "enum": [
+          "fake",
+          "fixture",
+          "live"
+        ]
+      },
+      "title": "Quarantined Source Counts",
+      "type": "object"
+    },
+    "redaction_version": {
+      "minLength": 1,
+      "title": "Redaction Version",
+      "type": "string"
+    },
+    "requested_count": {
+      "minimum": 0,
+      "title": "Requested Count",
+      "type": "integer"
+    },
+    "retried_count": {
+      "minimum": 0,
+      "title": "Retried Count",
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_counts": {
+      "additionalProperties": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "propertyNames": {
+        "enum": [
+          "fake",
+          "fixture",
+          "live"
+        ]
+      },
+      "title": "Source Counts",
+      "type": "object"
+    },
+    "split_counts": {
+      "additionalProperties": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "propertyNames": {
+        "enum": [
+          "train",
+          "validation",
+          "test"
+        ]
+      },
+      "title": "Split Counts",
+      "type": "object"
+    },
+    "split_source_counts": {
+      "additionalProperties": {
+        "additionalProperties": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "propertyNames": {
+          "enum": [
+            "fake",
+            "fixture",
+            "live"
+          ]
+        },
+        "type": "object"
+      },
+      "propertyNames": {
+        "enum": [
+          "train",
+          "validation",
+          "test"
+        ]
+      },
+      "title": "Split Source Counts",
+      "type": "object"
+    },
+    "status_counts": {
+      "additionalProperties": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "propertyNames": {
+        "enum": [
+          "rule_derived",
+          "teacher_single",
+          "teacher_consensus",
+          "judge_resolved",
+          "synthetic_invariant",
+          "quarantined"
+        ]
+      },
+      "title": "Status Counts",
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "manifest_id",
+    "created_at",
+    "files",
+    "split_counts",
+    "source_counts",
+    "split_source_counts",
+    "quarantined_source_counts",
+    "status_counts",
+    "class_counts",
+    "requested_count",
+    "completed_count",
+    "accepted_count",
+    "retried_count",
+    "quarantined_count",
+    "config_version",
+    "prompt_version",
+    "redaction_version"
+  ],
+  "title": "DatasetManifest",
+  "type": "object",
+  "x-tracehelix-invariants": true
+}

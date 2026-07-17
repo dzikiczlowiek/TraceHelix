@@ -1,0 +1,121 @@
+{
+  "$comment": "TraceHelix contract_validator is REQUIRED for relational identity/count/provenance invariants.",
+  "$defs": {
+    "Label": {
+      "enum": [
+        "Explore",
+        "Plan",
+        "Execute",
+        "Verify",
+        "Recover",
+        "Unknown"
+      ],
+      "title": "Label",
+      "type": "string"
+    }
+  },
+  "$id": "https://tracehelix.dev/schemas/teacher-label.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "abstained": {
+      "title": "Abstained",
+      "type": "boolean"
+    },
+    "accepted": {
+      "title": "Accepted",
+      "type": "boolean"
+    },
+    "available_event_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Available Event Ids",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "confidence": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Confidence"
+    },
+    "evidence_event_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Evidence Event Ids",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "example_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Example Id",
+      "type": "string"
+    },
+    "label": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Label"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "observable_reason": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Observable Reason"
+    },
+    "quarantine_reason": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Quarantine Reason"
+    },
+    "schema_version": {
+      "const": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "example_id",
+    "available_event_ids",
+    "abstained",
+    "accepted",
+    "label",
+    "confidence",
+    "evidence_event_ids",
+    "observable_reason",
+    "quarantine_reason"
+  ],
+  "title": "TeacherLabel",
+  "type": "object",
+  "x-tracehelix-invariants": true
+}

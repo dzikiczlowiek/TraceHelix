@@ -1,0 +1,361 @@
+{
+  "$comment": "TraceHelix contract_validator is REQUIRED for relational identity/count/provenance invariants.",
+  "$defs": {
+    "ContextEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_kind": {
+          "minLength": 1,
+          "title": "Event Kind",
+          "type": "string"
+        },
+        "event_text": {
+          "title": "Event Text",
+          "type": "string"
+        },
+        "tool_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Name"
+        }
+      },
+      "required": [
+        "event_id",
+        "event_text",
+        "event_kind"
+      ],
+      "title": "ContextEvent",
+      "type": "object"
+    },
+    "Label": {
+      "enum": [
+        "Explore",
+        "Plan",
+        "Execute",
+        "Verify",
+        "Recover",
+        "Unknown"
+      ],
+      "title": "Label",
+      "type": "string"
+    },
+    "LabelStatus": {
+      "enum": [
+        "rule_derived",
+        "teacher_single",
+        "teacher_consensus",
+        "judge_resolved",
+        "synthetic_invariant",
+        "quarantined"
+      ],
+      "title": "LabelStatus",
+      "type": "string"
+    },
+    "SourceCategory": {
+      "enum": [
+        "fake",
+        "fixture",
+        "live"
+      ],
+      "title": "SourceCategory",
+      "type": "string"
+    }
+  },
+  "$id": "https://tracehelix.dev/schemas/training-example.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "adapter": {
+      "minLength": 1,
+      "title": "Adapter",
+      "type": "string"
+    },
+    "adapter_version": {
+      "minLength": 1,
+      "title": "Adapter Version",
+      "type": "string"
+    },
+    "confidence": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Confidence"
+    },
+    "context_after": {
+      "items": {
+        "$ref": "#/$defs/ContextEvent"
+      },
+      "title": "Context After",
+      "type": "array"
+    },
+    "context_before": {
+      "items": {
+        "$ref": "#/$defs/ContextEvent"
+      },
+      "title": "Context Before",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "event_id": {
+      "minLength": 1,
+      "title": "Event Id",
+      "type": "string"
+    },
+    "event_kind": {
+      "minLength": 1,
+      "title": "Event Kind",
+      "type": "string"
+    },
+    "event_text": {
+      "title": "Event Text",
+      "type": "string"
+    },
+    "evidence_event_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Evidence Event Ids",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "example_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Example Id",
+      "type": "string"
+    },
+    "label": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Label"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "label_status": {
+      "$ref": "#/$defs/LabelStatus"
+    },
+    "license_or_consent": {
+      "minLength": 1,
+      "title": "License Or Consent",
+      "type": "string"
+    },
+    "lineage_id": {
+      "minLength": 1,
+      "title": "Lineage Id",
+      "type": "string"
+    },
+    "observable_reason": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Observable Reason"
+    },
+    "prompt_hash": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Prompt Hash"
+    },
+    "prompt_version": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Prompt Version"
+    },
+    "quarantine_reason": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Quarantine Reason"
+    },
+    "redaction_version": {
+      "minLength": 1,
+      "title": "Redaction Version",
+      "type": "string"
+    },
+    "request_hash": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Request Hash"
+    },
+    "response_hash": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Response Hash"
+    },
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_category": {
+      "$ref": "#/$defs/SourceCategory"
+    },
+    "source_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Hash",
+      "type": "string"
+    },
+    "split": {
+      "anyOf": [
+        {
+          "enum": [
+            "train",
+            "validation",
+            "test"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Split"
+    },
+    "task_group_id": {
+      "minLength": 1,
+      "title": "Task Group Id",
+      "type": "string"
+    },
+    "teacher_model": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Teacher Model"
+    },
+    "teacher_revision": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Teacher Revision"
+    },
+    "tool_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tool Name"
+    }
+  },
+  "required": [
+    "schema_version",
+    "example_id",
+    "run_id",
+    "event_id",
+    "task_group_id",
+    "lineage_id",
+    "context_before",
+    "event_text",
+    "context_after",
+    "event_kind",
+    "source_category",
+    "source_hash",
+    "adapter",
+    "adapter_version",
+    "redaction_version",
+    "license_or_consent",
+    "label",
+    "label_status",
+    "confidence",
+    "evidence_event_ids",
+    "observable_reason",
+    "teacher_model",
+    "teacher_revision",
+    "prompt_version",
+    "prompt_hash",
+    "request_hash",
+    "response_hash",
+    "created_at",
+    "split",
+    "quarantine_reason"
+  ],
+  "title": "TrainingExample",
+  "type": "object",
+  "x-tracehelix-invariants": true
+}
