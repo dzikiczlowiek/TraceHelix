@@ -14,10 +14,11 @@ def test_package_name() -> None:
 
 
 def test_production_wheel_installs_and_imports_contracts_without_dev_group(tmp_path: Path) -> None:
-    project = Path(__file__).parents[1]
+    project = Path(__file__).parents[1].resolve()
     wheel_dir = tmp_path / "dist"
     subprocess.run(
         ["uv", "build", "--offline", "--wheel", "--out-dir", str(wheel_dir), str(project)],
+        cwd=tmp_path,
         check=True,
     )
     wheel = next(wheel_dir.glob("*.whl"))
@@ -25,19 +26,26 @@ def test_production_wheel_installs_and_imports_contracts_without_dev_group(tmp_p
         policy_files = [name for name in archive.namelist() if name.endswith("/redaction-v1.json")]
     assert policy_files == ["tracehelix_training/redaction-v1.json"]
     venv = tmp_path / "venv"
-    subprocess.run(["uv", "venv", "--python", sys.executable, str(venv)], check=True)
+    subprocess.run(["uv", "venv", "--python", sys.executable, str(venv)], cwd=tmp_path, check=True)
     python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    empty_cache = tmp_path / "empty-uv-cache"
+    assert not empty_cache.exists()
+    install_env = os.environ.copy()
+    install_env.pop("UV_OFFLINE", None)
+    install_env["UV_CACHE_DIR"] = str(empty_cache)
     subprocess.run(
-        ["uv", "pip", "install", "--offline", "--python", str(python), str(wheel)],
+        ["uv", "pip", "install", "--python", str(python), str(wheel)],
+        cwd=tmp_path,
+        env=install_env,
         check=True,
     )
     subprocess.run(
         [
             str(python),
+            "-I",
             "-c",
             "import importlib.metadata as m; "
-            "assert any(r.startswith('jsonschema==4.26.0') "
-            "for r in m.requires('tracehelix-training')); "
+            "assert 'jsonschema==4.26.0' in m.requires('tracehelix-training'); "
             "import tracehelix_training.contracts; "
             "from tracehelix_training.redact import load_default_config, redact; "
             "cfg = load_default_config(); "
