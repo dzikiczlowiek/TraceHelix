@@ -45,8 +45,8 @@ export const api = {
     const after = cursor == null ? '' : `&cursor=${encodeURIComponent(String(cursor))}`;
     return request<EventPage>(`/api/v1/runs/${encodeURIComponent(id)}/events?limit=${limit}${after}`);
   },
-  analysis: (id: string) => request<Analysis>(`/api/v1/runs/${encodeURIComponent(id)}/analysis/latest`),
-  alerts: (id: string) => request<Alerts>(`/api/v1/runs/${encodeURIComponent(id)}/alerts`),
+  analysis: (id: string, signal?: AbortSignal) => request<Analysis>(`/api/v1/runs/${encodeURIComponent(id)}/analysis/latest`, { signal }),
+  alerts: (id: string, signal?: AbortSignal) => request<Alerts>(`/api/v1/runs/${encodeURIComponent(id)}/alerts`, { signal }),
   analyze: (id: string) => request<Analysis>(`/api/v1/runs/${encodeURIComponent(id)}/analysis/rules`, { method: 'POST' }),
   compare: (left: string, right: string) => request<Comparison>(`/api/v1/compare?left=${encodeURIComponent(left)}&right=${encodeURIComponent(right)}`),
 };

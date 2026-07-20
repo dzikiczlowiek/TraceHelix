@@ -1,0 +1,96 @@
+name: tracehelix
+
+x-api-image: &api-image
+  image: tracehelix-api:local
+
+services:
+  api:
+    <<: *api-image
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    init: true
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      URLS: http://0.0.0.0:5080
+      TRACEHELIX_ALLOW_WILDCARD: "true"
+      TRACEHELIX_DB: /data/tracehelix.db
+    volumes:
+      - tracehelix-data:/data
+    networks:
+      - tracehelix-internal
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/5080 && printf 'GET /health/ready HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n' >&3 && grep -q '\"status\":\"ready\"' <&3"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  web:
+    image: tracehelix-web:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    init: true
+    restart: unless-stopped
+    networks:
+      - tracehelix-internal
+      - tracehelix-edge
+    ports:
+      - "127.0.0.1:${TRACEHELIX_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--output-document=-", "http://127.0.0.1:8080/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:uid=101,gid=101,mode=0755
+      - /var/run:uid=101,gid=101,mode=0755
+      - /tmp:uid=101,gid=101,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  cli:
+    <<: *api-image
+    # Reuse the API image; building the same target/tag twice races under BuildKit.
+    profiles: ["tools"]
+    entrypoint: ["dotnet", "/app/cli/TraceHelix.Cli.dll"]
+    working_dir: /work
+    environment:
+      HOME: /tmp
+    volumes:
+      - tracehelix-data:/data
+      - ./imports:/imports:ro
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+
+volumes:
+  tracehelix-data:
+
+networks:
+  tracehelix-internal:
+    internal: true
+  tracehelix-edge:

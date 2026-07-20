@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, macos-15, windows-2025]
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -32,7 +32,7 @@ jobs:
         uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
         with:
           version: 0.11.29
-          python-version: '3.11'
+          python-version: '3.11.15'
           enable-cache: true
           cache-dependency-glob: training/uv.lock
       - name: Install locked exporter dependencies
@@ -48,7 +48,7 @@ jobs:
 
   e2e:
     name: Real-process end-to-end
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Check out repository
@@ -66,9 +66,60 @@ jobs:
       - name: Verify API real-process workflow
         run: make verify-api
 
+  containers:
+    name: Container build and supply-chain gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Verify repository security guards
+        run: python scripts/test_repository_guards.py
+      - name: Verify external build dependency pins
+        run: python scripts/verify_container_pins.py
+      - name: Build digest-pinned production images
+        run: docker compose --profile tools build --pull
+      - name: Verify Compose restart and recreation lifecycle
+        run: bash scripts/verify-compose-lifecycle.sh
+      - name: Generate API SBOM
+        uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11 # v0.23.0
+        with:
+          image: tracehelix-api:local
+          artifact-name: tracehelix-api.spdx.json
+          format: spdx-json
+          syft-version: v1.42.3
+          upload-artifact-retention: 14
+          upload-release-assets: false
+      - name: Generate web SBOM
+        uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11 # v0.23.0
+        with:
+          image: tracehelix-web:local
+          artifact-name: tracehelix-web.spdx.json
+          format: spdx-json
+          syft-version: v1.42.3
+          upload-artifact-retention: 14
+          upload-release-assets: false
+      - name: Scan API image for high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: tracehelix-api:local
+          version: v0.72.0
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+          exit-code: 1
+      - name: Scan web image for high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: tracehelix-web:local
+          version: v0.72.0
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+          exit-code: 1
+          skip-setup-trivy: true
+
   web:
     name: Web
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
@@ -83,7 +134,7 @@ jobs:
       - name: Set up Node.js 24
         uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
-          node-version: 24
+          node-version: 24.18.0
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Install locked dependencies
@@ -105,7 +156,7 @@ jobs:
 
   python:
     name: Python
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
@@ -117,7 +168,7 @@ jobs:
         uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
         with:
           version: 0.11.29
-          python-version: '3.11'
+          python-version: '3.11.15'
           enable-cache: true
           cache-dependency-glob: training/uv.lock
       - name: Install locked dependencies

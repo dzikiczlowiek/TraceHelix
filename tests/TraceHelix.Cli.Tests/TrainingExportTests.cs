@@ -11,6 +11,8 @@ public sealed class TrainingExportTests
     {
         var directory = Path.Combine(Path.GetTempPath(), $"trace helix {Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         var previousProject = Environment.GetEnvironmentVariable("TRACEHELIX_TRAINING_PROJECT");
         Environment.SetEnvironmentVariable("TRACEHELIX_TRAINING_PROJECT", Path.Combine(directory, "poisoned-project"));
         try
@@ -23,7 +25,8 @@ public sealed class TrainingExportTests
             var stdout = new StringWriter();
             var stderr = new StringWriter();
             var arguments = new[] { "dataset", "export", "--db", database, "--out", output, "--source-category", "fixture", "--license-or-consent", "generated fixture", "--mode", "online", "--context-before", "4", "--context-after", "0" };
-            Assert.Equal(0, await CliProgram.RunAsync(arguments, stdout, stderr, TestContext.Current.CancellationToken));
+            var exitCode = await CliProgram.RunAsync(arguments, stdout, stderr, TestContext.Current.CancellationToken);
+            Assert.True(exitCode == 0, $"Expected dataset export to succeed, but it returned {exitCode}: {stderr}");
             Assert.Equal(1, JsonDocument.Parse(stdout.ToString()).RootElement.GetProperty("candidateCount").GetInt32());
             var text = await File.ReadAllTextAsync(output, TestContext.Current.CancellationToken);
             Assert.DoesNotContain("person@example.com", text, StringComparison.Ordinal);

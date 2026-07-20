@@ -7,6 +7,7 @@ if [[ -n "${TRACEHELIX_VERIFY_DIR:-}" ]]; then
   find "$work" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 fi
 mkdir -p "$work"
+chmod 700 "$work"
 db="$work/tracehelix.db"
 cli=(dotnet "$root/src/TraceHelix.Cli/bin/Release/net10.0/TraceHelix.Cli.dll")
 "${cli[@]}" import "$root/samples/generic-jsonl/minimal.jsonl" --adapter generic-jsonl --db "$db" --json > "$work/import.json"
