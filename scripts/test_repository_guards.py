@@ -1227,6 +1227,52 @@ class WorkflowContractGuardTests(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_semantic_digests_match_reviewed_workflow_pins(self) -> None:
+        import workflow_contract
+
+        ci = workflow_contract.load_strict(WORKFLOW.read_text(encoding="utf-8"))
+        release = workflow_contract.load_strict(
+            RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            workflow_contract.CI_SEMANTIC_SHA256,
+            workflow_contract.semantic_digest(ci),
+        )
+        self.assertEqual(
+            workflow_contract.RELEASE_SEMANTIC_SHA256,
+            workflow_contract.semantic_digest(release),
+        )
+
+    def test_workflow_contract_cli_rejects_lone_surrogate_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="tracehelix-workflow-surrogate-") as tmp:
+            root = Path(tmp)
+            scripts = root / "scripts"
+            workflows = root / ".github" / "workflows"
+            scripts.mkdir()
+            workflows.mkdir(parents=True)
+            shutil.copy2(ROOT / "scripts" / "workflow_contract.py", scripts)
+            ci = WORKFLOW.read_text(encoding="utf-8").replace(
+                "name: CI", 'name: "\\ud83d evil"', 1
+            )
+            self.assertNotEqual(WORKFLOW.read_text(encoding="utf-8"), ci)
+            (workflows / "ci.yml").write_text(ci, encoding="utf-8")
+            shutil.copy2(RELEASE_WORKFLOW, workflows / "release.yml")
+
+            result = subprocess.run(
+                ["python3", str(scripts / "workflow_contract.py")],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertEqual("", result.stdout)
+        self.assertIn("workflow_contract:", result.stderr)
+        self.assertIn("workflow semantics are not hashable", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotIn("UnicodeEncodeError", result.stderr)
+
     def test_strict_loader_rejects_duplicate_keys_at_any_mapping_depth(self) -> None:
         import workflow_contract
 

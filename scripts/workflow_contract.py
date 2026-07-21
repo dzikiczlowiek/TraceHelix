@@ -98,13 +98,23 @@ def _require(condition: bool, message: str) -> None:
 
 
 def semantic_digest(data: dict[str, Any]) -> str:
-    """Hash complete parsed workflow semantics, ignoring comments/formatting."""
-    encoded = json.dumps(
-        data,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
+    """Hash complete parsed workflow semantics, ignoring comments/formatting.
+
+    The parsed YAML may contain strings with lone surrogate code points
+    (e.g. ``"\\ud83d"`` in double quotes). ``json.dumps(..., ensure_ascii=False)``
+    passes them through to ``.encode("utf-8")``, which raises an unhandled
+    ``UnicodeEncodeError``. Fail closed with a clear contract error instead
+    of exposing a traceback on the release-authoritative path.
+    """
+    try:
+        encoded = json.dumps(
+            data,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise WorkflowContractError(f"workflow semantics are not hashable: {exc}") from exc
     return hashlib.sha256(encoded).hexdigest()
 
 
