@@ -62,6 +62,30 @@ _WINDOWS_RESERVED_STEMS = frozenset(
     | {f"LPT{number}" for number in range(1, 10)}
 )
 _WINDOWS_FORBIDDEN_CHARS = frozenset('<>:"|?*')
+_FORBIDDEN_RELEASE_COMPONENTS = frozenset(
+    {
+        ".hermes",
+        ".pytest_cache",
+        "__pycache__",
+        "node_modules",
+        "bin",
+        "obj",
+        "dist",
+        "test-results",
+        "playwright-report",
+        "screenshots",
+    }
+)
+_FORBIDDEN_RELEASE_SUFFIXES = (
+    ".db",
+    ".db-journal",
+    ".db-shm",
+    ".db-wal",
+    ".pyc",
+    ".pyo",
+    ".sqlite",
+    ".sqlite3",
+)
 
 
 class BuildError(Exception):
@@ -216,6 +240,25 @@ def archive_mode_for(mode: int) -> int:
     raise BuildError(f"mode is not a regular file: {mode:o}")
 
 
+def is_release_source_path(path: str) -> bool:
+    """Return whether a validated tracked path belongs in the source release."""
+    components = path.split("/")
+    folded_components = tuple(component.casefold() for component in components)
+    if any(component in _FORBIDDEN_RELEASE_COMPONENTS for component in folded_components):
+        return False
+    folded_path = path.casefold()
+    if folded_components[0] == "traces" or folded_components[:2] == ("web", "traces"):
+        return False
+    if folded_path.endswith(_FORBIDDEN_RELEASE_SUFFIXES):
+        return False
+    if folded_components[0] == "imports" and folded_path != "imports/.gitkeep":
+        return False
+    name = folded_components[-1]
+    if name == ".env" or name.startswith(".env."):
+        return False
+    return True
+
+
 def read_tree(repo_root: Path, commit: str) -> list[TreeEntry]:
     """Read every entry of ``commit``'s tree from the Git object database."""
     raw = _run_git(["ls-tree", "-rz", "--full-tree", commit], cwd=repo_root)
@@ -230,7 +273,8 @@ def select_source_files(entries: list[TreeEntry]) -> list[TreeEntry]:
     """Validate entries and return the regular-file blobs to archive.
 
     Rejects symlinks, submodules, trees, unsupported modes, unsafe paths,
-    duplicate paths, and Unicode casefold collisions.
+    duplicate paths, and Unicode casefold collisions. Tracked development,
+    cache, test-output, local-database, and private-import paths are omitted.
     """
     if len(entries) > MAX_SOURCE_FILE_COUNT:
         raise BuildError(
@@ -261,7 +305,8 @@ def select_source_files(entries: list[TreeEntry]) -> list[TreeEntry]:
         if entry.mode == 0o160000:
             raise BuildError(f"submodule (gitlink) not supported: {entry.path!r}")
         if entry.mode in (0o100644, 0o100755):
-            files.append(entry)
+            if is_release_source_path(entry.path):
+                files.append(entry)
         else:
             raise BuildError(f"unsupported object mode {entry.mode:o} for {entry.path!r}")
     return files

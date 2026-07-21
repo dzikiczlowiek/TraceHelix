@@ -30,7 +30,9 @@ class BundleFixture(unittest.TestCase):
         self.files = [
             ("README.md", 0o644, b"# TraceHelix\n"),
             ("VERSION", 0o644, b"0.1.0\n"),
+            ("imports/.gitkeep", 0o644, b""),
             ("scripts/run.sh", 0o755, b"#!/bin/sh\nexit 0\n"),
+            ("src/TraceHelix.Domain/Traces/TraceEvent.cs", 0o644, b"namespace TraceHelix.Domain.Traces;\n"),
         ]
         manifest = B.build_manifest(self.version, "a" * 40, self.root, self.files)
         self.base_tar = B.build_tar(self.root, self.files + [(B.MANIFEST_NAME, 0o644, manifest)])
@@ -95,6 +97,10 @@ class BundleFixture(unittest.TestCase):
 
 
 class TestSuccess(BundleFixture):
+    def test_builder_and_verifier_release_exclusions_match(self) -> None:
+        self.assertEqual(B._FORBIDDEN_RELEASE_COMPONENTS, V.FORBIDDEN_RELEASE_COMPONENTS)
+        self.assertEqual(B._FORBIDDEN_RELEASE_SUFFIXES, V.FORBIDDEN_RELEASE_SUFFIXES)
+
     def test_verify_and_extract(self) -> None:
         target = self._extract()
         summary = V.verify_and_extract(self.archive.resolve(), self.checksums.resolve(), target.resolve())
@@ -181,7 +187,7 @@ class TestTarAttacks(BundleFixture):
         self._reject(list(reversed(self._specs())))
 
     def test_nonzero_data_after_logical_tar_end_rejected(self) -> None:
-        tampered = bytearray(self.base_tar)
+        tampered = bytearray(self.base_tar + b"\x00" * 1024)
         with tarfile.open(fileobj=io.BytesIO(self.base_tar), mode="r:") as tar:
             tar.getmembers()
             hidden_offset = tar.offset + 1024
@@ -239,6 +245,18 @@ class TestManifestAttacks(BundleFixture):
             if spec["name"] == f"{self.root}/{B.MANIFEST_NAME}":
                 spec["data"] = b'{"schemaVersion":1,"schemaVersion":1}\n'
         self._reject_tar(self._tar(specs))
+
+    def test_manifest_consistent_forbidden_source_path_is_rejected(self) -> None:
+        files = [
+            (".hermes/plans/private.md", 0o644, b"internal\n"),
+            ("VERSION", 0o644, b"0.1.0\n"),
+        ]
+        manifest = B.build_manifest(self.version, "a" * 40, self.root, files)
+        hostile = B.build_tar(
+            self.root,
+            files + [(B.MANIFEST_NAME, 0o644, manifest)],
+        )
+        self._reject_tar(hostile)
 
 
 class TestExtractionRollback(BundleFixture):

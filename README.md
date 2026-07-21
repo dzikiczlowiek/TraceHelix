@@ -122,7 +122,7 @@ The source-bundle gate builds the committed `HEAD` twice from Git objects, requi
 sg docker -c "bash scripts/verify-release-bundle.sh"
 ```
 
-`scripts/build_release_bundle.py` writes only to an absolute output directory outside the worktree. `scripts/verify_release_bundle.py` validates the checksum, deterministic gzip/tar metadata, path/type/boundary rules, and every `RELEASE-MANIFEST.json` hash before extracting without `tar.extractall`. The bounded CI job is named `Release bundle acceptance` (`timeout-minutes: 35`). This is local install-from-artifact evidence; a public tag, GitHub Release, signed provenance, and downloaded-public-artifact verification remain release follow-ups.
+`scripts/build_release_bundle.py` writes only to an absolute output directory outside the worktree and packages eligible committed source while excluding `.hermes`, caches, build/test/browser outputs, local databases/bytecode, environment files, and private imports. `scripts/verify_release_bundle.py` independently enforces the same exclusions and validates the checksum, deterministic gzip/tar metadata, path/type/boundary rules, and every `RELEASE-MANIFEST.json` hash before extracting without `tar.extractall`. The bounded CI job is named `Release bundle acceptance` (`timeout-minutes: 35`). This is local install-from-artifact evidence; a public tag, GitHub Release, signed provenance, and downloaded-public-artifact verification remain release follow-ups.
 
 See [`docs/architecture.md`](docs/architecture.md) for trust boundaries and data flow, and [`docs/verification.md`](docs/verification.md) for the complete local/CI gate matrix and exact-snapshot review rules.
 

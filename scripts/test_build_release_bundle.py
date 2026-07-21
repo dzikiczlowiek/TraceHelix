@@ -525,6 +525,34 @@ class TestSelectSourceFiles(unittest.TestCase):
         selected = B.select_source_files(entries)
         self.assertEqual([e.path for e in selected], ["a", "b"])
 
+    def test_tracked_development_and_private_artifacts_are_excluded(self) -> None:
+        forbidden = (
+            ".hermes/plans/internal.md",
+            ".pytest_cache/README.md",
+            "web/test-results/result.json",
+            "web/playwright-report/index.html",
+            "web/screenshots/failure.png",
+            "web/traces/run.zip",
+            "data/local.db",
+            "src/__pycache__/module.pyc",
+            "imports/private-trace.jsonl",
+        )
+        allowed_trace_source = "src/TraceHelix.Domain/Traces/TraceEvent.cs"
+        entries = [
+            _entry(path="README.md"),
+            _entry(path=allowed_trace_source),
+            *(_entry(path=p) for p in forbidden),
+        ]
+        selected = B.select_source_files(entries)
+        self.assertEqual(
+            [entry.path for entry in selected],
+            ["README.md", allowed_trace_source],
+        )
+
+    def test_imports_placeholder_remains_eligible(self) -> None:
+        selected = B.select_source_files([_entry(path="imports/.gitkeep")])
+        self.assertEqual([entry.path for entry in selected], ["imports/.gitkeep"])
+
 
 # --- blob/size bounds ------------------------------------------------------
 

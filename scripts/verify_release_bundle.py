@@ -32,6 +32,30 @@ RESERVED = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {
     f"LPT{i}" for i in range(1, 10)
 }
 FORBIDDEN = frozenset('<>:"|?*')
+FORBIDDEN_RELEASE_COMPONENTS = frozenset(
+    {
+        ".hermes",
+        ".pytest_cache",
+        "__pycache__",
+        "node_modules",
+        "bin",
+        "obj",
+        "dist",
+        "test-results",
+        "playwright-report",
+        "screenshots",
+    }
+)
+FORBIDDEN_RELEASE_SUFFIXES = (
+    ".db",
+    ".db-journal",
+    ".db-shm",
+    ".db-wal",
+    ".pyc",
+    ".pyo",
+    ".sqlite",
+    ".sqlite3",
+)
 
 
 class VerifyError(Exception):
@@ -57,6 +81,22 @@ def validate_path(path: str) -> None:
             raise VerifyError(f"platform-invalid archive path: {path!r}")
         if component.split(".", 1)[0].upper() in RESERVED:
             raise VerifyError(f"platform-reserved archive path: {path!r}")
+
+
+def is_release_source_path(path: str) -> bool:
+    """Return whether a validated relative path is eligible release source."""
+    components = tuple(component.casefold() for component in path.split("/"))
+    if any(component in FORBIDDEN_RELEASE_COMPONENTS for component in components):
+        return False
+    folded = path.casefold()
+    if components[0] == "traces" or components[:2] == ("web", "traces"):
+        return False
+    if folded.endswith(FORBIDDEN_RELEASE_SUFFIXES):
+        return False
+    if components[0] == "imports" and folded not in ("imports", "imports/.gitkeep"):
+        return False
+    name = components[-1]
+    return not (name == ".env" or name.startswith(".env."))
 
 
 def _read_bounded(path: Path, limit: int, label: str) -> bytes:
@@ -204,6 +244,13 @@ def inspect_archive(tar_bytes: bytes, archive_name: str) -> tuple[dict[str, obje
             raise VerifyError(f"missing directory ancestor: {member.name}")
 
     manifest_name = f"{root}/{MANIFEST_NAME}"
+    prefix = root + "/"
+    for member, _ in payloads:
+        if member.name == root or member.name == manifest_name:
+            continue
+        relative = member.name[len(prefix):]
+        if not is_release_source_path(relative):
+            raise VerifyError(f"forbidden release source path: {relative}")
     manifests = [(member, data) for member, data in payloads if member.name == manifest_name and member.isreg()]
     if len(manifests) != 1:
         raise VerifyError("archive must contain exactly one root manifest")

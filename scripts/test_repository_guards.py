@@ -1063,6 +1063,23 @@ class ReleaseBundleGuardTests(unittest.TestCase):
         "bash scripts/verify-compose-lifecycle.sh",
         "bash scripts/verify-browser.sh",
     )
+    BUILDER_EXCLUSION_ANCHORS = (
+        "_FORBIDDEN_RELEASE_COMPONENTS",
+        '".hermes"',
+        '"test-results"',
+        '"playwright-report"',
+        '".db"',
+        'folded_components[0] == "imports"',
+    )
+    VERIFIER_EXCLUSION_ANCHORS = (
+        "FORBIDDEN_RELEASE_COMPONENTS",
+        '".hermes"',
+        '"test-results"',
+        '"playwright-report"',
+        '".db"',
+        'components[0] == "imports"',
+        "forbidden release source path",
+    )
     README_ANCHORS = (
         "Deterministic release bundle",
         'sg docker -c "bash scripts/verify-release-bundle.sh"',
@@ -1099,6 +1116,10 @@ class ReleaseBundleGuardTests(unittest.TestCase):
 
     def test_acceptance_script_preserves_extracted_artifact_contract(self) -> None:
         self._require_with_mutation(BUNDLE_ACCEPTANCE, self.SCRIPT_ANCHORS)
+
+    def test_builder_and_verifier_preserve_release_exclusions(self) -> None:
+        self._require_with_mutation(BUNDLE_BUILDER, self.BUILDER_EXCLUSION_ANCHORS)
+        self._require_with_mutation(BUNDLE_VERIFIER, self.VERIFIER_EXCLUSION_ANCHORS)
 
     def test_readme_documents_bundle_without_public_release_overclaim(self) -> None:
         self._require_with_mutation(README, self.README_ANCHORS)
