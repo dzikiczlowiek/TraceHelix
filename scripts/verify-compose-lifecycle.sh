@@ -97,6 +97,10 @@ blocker_ip=$(docker inspect --format "{{(index .NetworkSettings.Networks \"${PRO
 new_api_id=$("${DC[@]}" ps --quiet api)
 new_api_ip=$(docker inspect --format "{{(index .NetworkSettings.Networks \"${PROJECT}_tracehelix-internal\").IPAddress}}" "$new_api_id")
 [[ -n "$new_api_ip" && "$new_api_ip" != "$old_api_ip" ]]
+web_id_after_api_recreate=$("${DC[@]}" ps --quiet web)
+[[ "$web_id_after_api_recreate" == "$web_id" ]]
+printf 'Forced API-IP recovery: old=%s blocker=%s new=%s; web container unchanged=%s\n' \
+  "$old_api_ip" "$blocker_ip" "$new_api_ip" "$web_id"
 wait_ready 30
 docker rm --force "$BLOCKER" >/dev/null
 BLOCKER=""

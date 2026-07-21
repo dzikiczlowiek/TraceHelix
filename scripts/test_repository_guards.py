@@ -544,14 +544,17 @@ class ContainerPinVerifierTests(unittest.TestCase):
 class CriticalInvariantTests(unittest.TestCase):
     """Guard reviewed DNS configuration and lifecycle script bytes."""
 
-    RESOLVER = "resolver 127.0.0.11 valid=5s ipv6=off;"
-    ZONE = "zone tracehelix_api 64k;"
-    RESOLVABLE_SERVER = "server api:5080 resolve;"
+    RESOLVER = "resolver 127.0.0.11 valid=1s ipv6=off;"
+    API_VARIABLE = "set $tracehelix_api api:5080;"
+    API_PROXY_PASS = "proxy_pass http://$tracehelix_api$request_uri;"
+    API_LOCATION = "location ~ ^/(api|health)/ {"
+    API_SERVER_NAME = "server_name 127.0.0.1 localhost;"
     BLOCKER_REUSES_OLD_IP = '[[ "$blocker_ip" == "$old_api_ip" ]]'
     NEW_API_USES_NEW_IP = '[[ -n "$new_api_ip" && "$new_api_ip" != "$old_api_ip" ]]'
+    WEB_ID_UNCHANGED = '[[ "$web_id_after_api_recreate" == "$web_id" ]]'
     # Intentional lifecycle edits require review and an explicit digest update.
     EXPECTED_LIFECYCLE_SHA256 = (
-        "d0b9cb9518b53f375ced8dcf1239f39df61d49b60d3fdca456c882e07e5c6c5d"
+        "bc04e2f9c23c0dcd5feff2877d56e7fc6c53ed3d2fd26abedcbbda45f3d1359b"
     )
 
     @staticmethod
@@ -637,48 +640,91 @@ class CriticalInvariantTests(unittest.TestCase):
             )
         return top_level
 
-    def _upstream_lines(self, nginx_lines: list[str]) -> list[str]:
-        opening = "upstream tracehelix_api {"
-        try:
-            start = nginx_lines.index(opening)
-        except ValueError:
-            self.fail(f"Missing active nginx block: {opening!r}")
+    def _all_direct_block_lines(
+        self, nginx_lines: list[str], opening: str
+    ) -> list[list[str]]:
+        """Return direct active directives for every exact nginx block opening."""
+        blocks: list[list[str]] = []
+        for start, line in enumerate(nginx_lines):
+            if line != opening:
+                continue
+            depth = self._brace_delta(opening)
+            self.assertEqual(1, depth, f"Malformed nginx block opening: {opening!r}")
+            direct: list[str] = []
+            for child in nginx_lines[start + 1 :]:
+                next_depth = depth + self._brace_delta(child)
+                if depth == 1 and next_depth >= 1:
+                    direct.append(child)
+                depth = next_depth
+                if depth == 0:
+                    blocks.append(direct)
+                    break
+            else:
+                self.fail(f"Unclosed active nginx block: {opening!r}")
+        return blocks
 
-        depth = 0
-        block = []
-        for index in range(start, len(nginx_lines)):
-            line = nginx_lines[index]
-            depth += self._brace_delta(line)
-            if index != start and depth > 0:
-                block.append(line)
-            if index != start and depth == 0:
-                return block
-        self.fail(f"Unclosed active nginx block: {opening!r}")
+    def _direct_block_lines(
+        self, nginx_lines: list[str], opening: str
+    ) -> list[str]:
+        blocks = self._all_direct_block_lines(nginx_lines, opening)
+        self.assertEqual(1, len(blocks), f"Expected one active nginx block: {opening!r}")
+        return blocks[0]
 
     def _assert_nginx_invariants(self, nginx_text: str) -> None:
         nginx_lines = self._active_lines(nginx_text)
         top_level_lines = self._top_level_lines(nginx_lines)
-        upstream_lines = self._upstream_lines(nginx_lines)
-
-        checks = (
-            (
-                top_level_lines,
-                self.RESOLVER,
-                "active Docker DNS resolver at http/top-level scope",
-            ),
-            (
-                upstream_lines,
-                self.ZONE,
-                "shared zone inside the tracehelix_api upstream",
-            ),
-            (
-                upstream_lines,
-                self.RESOLVABLE_SERVER,
-                "runtime-resolved API server inside the tracehelix_api upstream",
-            ),
+        resolver_lines = [line for line in nginx_lines if line.startswith("resolver ")]
+        self.assertEqual(
+            [self.RESOLVER],
+            resolver_lines,
+            "Require exactly one active, canonical Docker DNS resolver; nested or decoy resolvers are forbidden",
         )
-        for haystack, needle, label in checks:
-            self.assertIn(needle, haystack, f"Missing {label}: {needle!r}")
+        self.assertEqual(
+            [self.RESOLVER],
+            [line for line in top_level_lines if line.startswith("resolver ")],
+            "Docker DNS resolver must be active at http/top-level scope",
+        )
+        self.assertFalse(
+            any(line.startswith("upstream ") for line in nginx_lines),
+            "The stale upstream resolve form is forbidden; proxy through the runtime DNS variable instead",
+        )
+        self.assertEqual(
+            [self.API_VARIABLE],
+            [line for line in nginx_lines if line.startswith("set ")],
+            "Require exactly one active API runtime DNS variable",
+        )
+        self.assertEqual(
+            [self.API_PROXY_PASS],
+            [line for line in nginx_lines if line.startswith("proxy_pass ")],
+            "Require exactly one API proxy_pass preserving the original request URI",
+        )
+
+        api_server_blocks = [
+            direct
+            for direct in self._all_direct_block_lines(nginx_lines, "server {")
+            if self.API_SERVER_NAME in direct and self.API_LOCATION in direct
+        ]
+        self.assertEqual(
+            1,
+            len(api_server_blocks),
+            "API proxy location must be a direct child of the allowed-host server block",
+        )
+        location_direct = self._direct_block_lines(nginx_lines, self.API_LOCATION)
+        required_location_directives = (
+            self.API_VARIABLE,
+            self.API_PROXY_PASS,
+            "proxy_http_version 1.1;",
+            "proxy_set_header Host $http_host;",
+            "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+            "proxy_set_header X-Forwarded-Proto $scheme;",
+            "proxy_hide_header Server;",
+        )
+        for directive in required_location_directives:
+            self.assertIn(
+                directive,
+                location_direct,
+                f"Missing required direct API proxy directive: {directive!r}",
+            )
 
     def _assert_lifecycle_digest(self, lifecycle_bytes: bytes) -> None:
         actual = hashlib.sha256(lifecycle_bytes).hexdigest()
@@ -703,9 +749,9 @@ class CriticalInvariantTests(unittest.TestCase):
         self._assert_nginx_invariants(NGINX_CONF.read_text(encoding="utf-8"))
         self._assert_lifecycle_digest(COMPOSE_LIFECYCLE.read_bytes())
 
-    def test_commented_nginx_invariants_are_rejected(self) -> None:
+    def test_commented_nginx_runtime_dns_invariants_are_rejected(self) -> None:
         nginx_text = NGINX_CONF.read_text(encoding="utf-8")
-        for needle in (self.RESOLVER, self.ZONE, self.RESOLVABLE_SERVER):
+        for needle in (self.RESOLVER, self.API_VARIABLE, self.API_PROXY_PASS):
             with self.subTest(needle=needle):
                 mutated = self._comment_out(nginx_text, needle)
                 with self.assertRaises(AssertionError):
@@ -715,9 +761,11 @@ class CriticalInvariantTests(unittest.TestCase):
         lifecycle_text = COMPOSE_LIFECYCLE.read_text(encoding="utf-8")
         blocker = self.BLOCKER_REUSES_OLD_IP
         new_api = self.NEW_API_USES_NEW_IP
+        web_id = self.WEB_ID_UNCHANGED
         mutations = {
             "comment-blocker-assertion": self._comment_out(lifecycle_text, blocker),
             "comment-new-api-assertion": self._comment_out(lifecycle_text, new_api),
+            "comment-web-identity-assertion": self._comment_out(lifecycle_text, web_id),
             "quoted-heredoc": lifecycle_text.replace(
                 blocker,
                 ": <<'INERT_GUARD_TEXT'\n"
@@ -756,6 +804,11 @@ class CriticalInvariantTests(unittest.TestCase):
                 f"if false; then\n  {new_api}\nfi",
                 1,
             ),
+            "unreachable-web-identity-assertion": lifecycle_text.replace(
+                web_id,
+                f"if false; then\n  {web_id}\nfi",
+                1,
+            ),
         }
 
         for label, mutated in mutations.items():
@@ -768,7 +821,7 @@ class CriticalInvariantTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     self._assert_lifecycle_digest(mutated.encode("utf-8"))
 
-    def test_quoted_comment_and_braces_do_not_deceive_nginx_parser(self) -> None:
+    def test_runtime_dns_structure_rejects_stale_decoys_and_relocation(self) -> None:
         quoted_line = 'guard "# not-comment }"; # real comment'
         self.assertEqual(
             'guard "# not-comment }";', self._strip_unquoted_comment(quoted_line)
@@ -776,33 +829,39 @@ class CriticalInvariantTests(unittest.TestCase):
         self.assertEqual(0, self._brace_delta(self._strip_unquoted_comment(quoted_line)))
 
         nginx_text = NGINX_CONF.read_text(encoding="utf-8")
-        for needle in (self.ZONE, self.RESOLVABLE_SERVER):
-            with self.subTest(needle=needle):
-                moved = nginx_text.replace(f"    {needle}\n", "", 1)
-                moved = moved.replace(
-                    "upstream tracehelix_api {\n",
-                    'upstream tracehelix_api {\n    guard "{";\n',
-                    1,
-                )
-                moved += f"\n{needle}\n"
-                with self.assertRaises(AssertionError):
-                    self._assert_nginx_invariants(moved)
-
-    def test_resolver_nested_in_a_server_block_is_rejected(self) -> None:
-        nginx_text = NGINX_CONF.read_text(encoding="utf-8")
-        # The exact directive bytes stay active in the file, but only inside a
-        # nested server block where nginx leaves resolver inert for runtime
-        # resolution. A line-anywhere scan would miss this weakening, so the
-        # depth-zero scope check must be what rejects it.
-        self.assertIn(self.RESOLVER + "\n", nginx_text)
-        moved = nginx_text.replace(
+        nested_resolver = nginx_text.replace(
             self.RESOLVER + "\n",
             "server {\n    " + self.RESOLVER + "\n}\n",
             1,
         )
-        self.assertIn(self.RESOLVER, self._active_lines(moved))
-        with self.assertRaises(AssertionError):
-            self._assert_nginx_invariants(moved)
+        variable_outside_location = nginx_text.replace(
+            "        " + self.API_VARIABLE + "\n", "", 1
+        ).replace(
+            self.API_SERVER_NAME + "\n",
+            self.API_SERVER_NAME + "\n    " + self.API_VARIABLE + "\n",
+            1,
+        )
+        mutations = {
+            "active-stale-upstream": nginx_text
+            + "\nupstream tracehelix_api {\n    server api:5080 resolve;\n}\n",
+            "second-resolver-decoy": nginx_text
+            + "\nresolver 127.0.0.11 valid=5s ipv6=off;\n",
+            "nested-resolver": nested_resolver,
+            "variable-outside-api-location": variable_outside_location,
+            "altered-proxy-uri": nginx_text.replace(
+                self.API_PROXY_PASS, "proxy_pass http://$tracehelix_api;", 1
+            ),
+            "altered-api-location": nginx_text.replace(
+                self.API_LOCATION, "location ~ ^/api/ {", 1
+            ),
+            "dropped-host-forwarding": self._comment_out(
+                nginx_text, "proxy_set_header Host $http_host;"
+            ),
+        }
+        for label, mutated in mutations.items():
+            with self.subTest(label=label):
+                with self.assertRaises(AssertionError):
+                    self._assert_nginx_invariants(mutated)
 
     def test_unbalanced_nginx_braces_fail_closed(self) -> None:
         nginx_text = NGINX_CONF.read_text(encoding="utf-8")
