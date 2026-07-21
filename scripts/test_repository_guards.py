@@ -444,7 +444,7 @@ class CriticalInvariantTests(unittest.TestCase):
     NEW_API_USES_NEW_IP = '[[ -n "$new_api_ip" && "$new_api_ip" != "$old_api_ip" ]]'
     # Intentional lifecycle edits require review and an explicit digest update.
     EXPECTED_LIFECYCLE_SHA256 = (
-        "7281d33200e9fd0e44c35e874fb1ca37e5cd94ca79a54bf33fa1489eaf3f1716"
+        "d0b9cb9518b53f375ced8dcf1239f39df61d49b60d3fdca456c882e07e5c6c5d"
     )
 
     @staticmethod
@@ -1115,6 +1115,10 @@ class ReleaseBundleGuardTests(unittest.TestCase):
         "public release",
         "downloaded-public-artifact verification",
     )
+    COMPOSE_LIFECYCLE_TEARDOWN_ANCHORS = (
+        "com.docker.compose.project",
+        "teardown left Docker resources",
+    )
 
     def _require_with_mutation(self, path: Path, anchors: tuple[str, ...]) -> None:
         text = path.read_text(encoding="utf-8")
@@ -1246,6 +1250,11 @@ class ReleaseBundleGuardTests(unittest.TestCase):
             self.assertEqual(143, process.returncode, stderr)
             self.assertEqual([], list(tmpdir.glob("tracehelix-release-bundle-*")))
             self.assertEqual("", stdout)
+
+    def test_compose_lifecycle_teardown_is_fail_closed(self) -> None:
+        self._require_with_mutation(
+            COMPOSE_LIFECYCLE, self.COMPOSE_LIFECYCLE_TEARDOWN_ANCHORS
+        )
 
 
 if __name__ == "__main__":
