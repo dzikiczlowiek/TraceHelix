@@ -1,0 +1,6 @@
+# Default code owners for TraceHelix.
+# CODEOWNERS requests review; it does not replace the exact-snapshot review
+# discipline in CONTRIBUTING.md and docs/verification.md, nor the repository
+# guards and container pin gates.
+
+* @dzikiczlowiek
