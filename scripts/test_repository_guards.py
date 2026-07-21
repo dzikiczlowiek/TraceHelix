@@ -17,12 +17,15 @@ import tomllib
 import unittest
 import xml.etree.ElementTree as ET
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 FINGERPRINT = ROOT / "scripts" / "source_fingerprint.py"
 PIN_VERIFIER = ROOT / "scripts" / "verify_container_pins.py"
 DOCKERFILE = ROOT / "Dockerfile"
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 NGINX_CONF = ROOT / "deploy" / "nginx.conf"
 COMPOSE_LIFECYCLE = ROOT / "scripts" / "verify-compose-lifecycle.sh"
 VERSION = ROOT / "VERSION"
@@ -36,6 +39,7 @@ CODEOWNERS = ROOT / ".github" / "CODEOWNERS"
 PR_TEMPLATE = ROOT / ".github" / "pull_request_template.md"
 RELEASE_READINESS = ROOT / "docs" / "release-readiness-v0.1.0.md"
 VERIFICATION_MD = ROOT / "docs" / "verification.md"
+RELEASE_POLICY_MD = ROOT / "docs" / "release-policy.md"
 README = ROOT / "README.md"
 ARCHITECTURE = ROOT / "docs" / "architecture.md"
 BROWSER_VERIFIER = ROOT / "scripts" / "verify-browser.sh"
@@ -288,7 +292,10 @@ class RepositoryPrivacyTests(unittest.TestCase):
 
 class ContainerPinVerifierTests(unittest.TestCase):
     def run_verifier(
-        self, dockerfile: str, workflow: str | None = None
+        self,
+        dockerfile: str,
+        workflow: str | None = None,
+        release_workflow: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory(prefix="tracehelix-container-pins-") as temp:
             root = Path(temp)
@@ -298,6 +305,16 @@ class ContainerPinVerifierTests(unittest.TestCase):
             (root / "Dockerfile").write_text(dockerfile, encoding="utf-8")
             (root / ".github" / "workflows" / "ci.yml").write_text(
                 workflow if workflow is not None else WORKFLOW.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            # The verifier now covers release.yml with its own exact allowlist,
+            # so every fixture materializes a release workflow too. Tests that
+            # do not care about release.yml get the real, valid file; tests that
+            # mutate it pass an explicit override.
+            (root / ".github" / "workflows" / "release.yml").write_text(
+                release_workflow
+                if release_workflow is not None
+                else RELEASE_WORKFLOW.read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
             return subprocess.run(
@@ -381,6 +398,14 @@ class ContainerPinVerifierTests(unittest.TestCase):
         result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), mutated)
         self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_rejects_a_quoted_valid_action_key(self) -> None:
+        # Exact action text is not enough: a quoted YAML key is an unsupported
+        # syntax escape even when it names an otherwise approved full SHA.
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutated = workflow.replace("        uses: actions/checkout@", "        'uses': actions/checkout@", 1)
+        result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), mutated)
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_rejects_unknown_shorthand_github_action_step(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         marker = "      - name: Generate API SBOM"
@@ -432,6 +457,91 @@ class ContainerPinVerifierTests(unittest.TestCase):
         self.assertNotEqual(workflow, mutated)
         result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), mutated)
         self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_pin_verifier_covers_the_release_workflow(self) -> None:
+        # The pin verifier must extend its exact ordered SHA allowlist to the
+        # release workflow, not only ci.yml. Running against the real repo,
+        # it must pass and its summary must mention the release coverage.
+        result = subprocess.run(
+            ["python", str(PIN_VERIFIER)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("release", result.stdout.lower(), result.stdout + result.stderr)
+
+    def test_rejects_an_unapproved_release_runtime_selector(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        mutated = workflow.replace("node-version: 24.18.0", "node-version: 24.19.0", 1)
+        result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), None, mutated)
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_rejects_a_mutable_release_action_reference(self) -> None:
+        # A mutable tag on any release.yml action must fail closed independently
+        # of ci.yml, which is left at its real, valid value.
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        mutated, count = re.subn(
+            r"actions/checkout@[0-9a-f]{40}",
+            "actions/checkout@v6",
+            workflow,
+            count=1,
+        )
+        self.assertEqual(1, count)
+        result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), None, mutated)
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_rejects_an_unapproved_release_action_reference(self) -> None:
+        # An attacker action pinned to a full SHA still fails because it is not
+        # on the exact ordered release allowlist.
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        marker = "      - name: Check out repository\n"
+        self.assertIn(marker, workflow)
+        mutated = workflow.replace(
+            marker,
+            "      - uses: attacker/exfiltrate@abcdef1234567890abcdef1234567890abcdef12\n"
+            + marker,
+            1,
+        )
+        result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), None, mutated)
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_rejects_quoted_release_uses_key(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        marker = "      - name: Check out repository\n"
+        self.assertIn(marker, workflow)
+        mutated = workflow.replace(
+            marker,
+            '      - { "uses": attacker/exfiltrate@abcdef1234567890abcdef1234567890abcdef12 }\n'
+            + marker,
+            1,
+        )
+        result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), None, mutated)
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_rejects_a_missing_release_workflow_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="tracehelix-container-pins-") as temp:
+            root = Path(temp)
+            (root / "scripts").mkdir()
+            (root / ".github" / "workflows").mkdir(parents=True)
+            shutil.copy2(PIN_VERIFIER, root / "scripts" / PIN_VERIFIER.name)
+            (root / "Dockerfile").write_text(
+                DOCKERFILE.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            (root / ".github" / "workflows" / "ci.yml").write_text(
+                WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            # release.yml is intentionally absent: the verifier must fail closed.
+            result = subprocess.run(
+                ["python", str(root / "scripts" / PIN_VERIFIER.name)],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("release.yml", result.stdout + result.stderr)
 
 
 class CriticalInvariantTests(unittest.TestCase):
@@ -1103,9 +1213,11 @@ class ReleaseBundleGuardTests(unittest.TestCase):
         "deterministic local source bundle",
         "install-from-artifact evidence",
         "no public tag",
+        "tag-only release workflow is present",
     )
     CHANGELOG_LIMITATION_ANCHORS = (
         "local install-from-artifact evidence",
+        "tag-only release workflow is present",
         "no published release bundle",
         "downloaded-public-artifact verification",
     )
@@ -1118,6 +1230,15 @@ class ReleaseBundleGuardTests(unittest.TestCase):
     COMPOSE_LIFECYCLE_TEARDOWN_ANCHORS = (
         "com.docker.compose.project",
         "teardown left Docker resources",
+    )
+    VERIFIED_EXPORT_ANCHORS = (
+        "TRACEHELIX_VERIFIED_OUTPUT_DIR",
+        "export_verified_output",
+        "destination must be an absolute path",
+        "destination must be a pre-existing empty directory",
+        "destination must be outside the checkout and work directory",
+        "RELEASE-MANIFEST.json",
+        "rollback_verified_export",
     )
 
     def _require_with_mutation(self, path: Path, anchors: tuple[str, ...]) -> None:
@@ -1161,6 +1282,23 @@ class ReleaseBundleGuardTests(unittest.TestCase):
     def test_builder_and_verifier_preserve_release_exclusions(self) -> None:
         self._require_with_mutation(BUNDLE_BUILDER, self.BUILDER_EXCLUSION_ANCHORS)
         self._require_with_mutation(BUNDLE_VERIFIER, self.VERIFIER_EXCLUSION_ANCHORS)
+
+    def test_acceptance_script_has_fail_closed_verified_output_export(self) -> None:
+        """An opt-in export can only happen after the verified extracted gates."""
+        self._require_with_mutation(BUNDLE_ACCEPTANCE, self.VERIFIED_EXPORT_ANCHORS)
+        script = BUNDLE_ACCEPTANCE.read_text(encoding="utf-8")
+        export_at = script.rindex("\nexport_verified_output\n")
+        browser_at = script.index('bash scripts/verify-browser.sh')
+        self.assertGreater(export_at, browser_at)
+        self.assertIn('"$OUT_A/$ARCHIVE"', script[export_at:])
+        self.assertIn('RELEASE-MANIFEST.json) source="$SOURCE/$name"', script)
+        append_at = script.index('EXPORTED_FILES+=("$name")')
+        copy_at = script.index('copy_verified_file_exclusively "$source" "$destination/$name"')
+        self.assertLess(
+            append_at,
+            copy_at,
+            "rollback must know the destination name before an interruptible copy starts",
+        )
 
     def test_readme_documents_bundle_without_public_release_overclaim(self) -> None:
         self._require_with_mutation(README, self.README_ANCHORS)
@@ -1255,6 +1393,353 @@ class ReleaseBundleGuardTests(unittest.TestCase):
         self._require_with_mutation(
             COMPOSE_LIFECYCLE, self.COMPOSE_LIFECYCLE_TEARDOWN_ANCHORS
         )
+
+
+class ReleaseWorkflowGuardTests(unittest.TestCase):
+    """Guard the fail-closed GitHub release workflow contract.
+
+    These guards fail closed if ``.github/workflows/release.yml`` is missing,
+    republishes on a dispatch, weakens tag/version equality, broadens
+    permissions, mutably pins an action, rebuilds the bundle inside the
+    publication job, or omits a required gate or release artifact. They
+    complement the exact ordered SHA allowlist enforced for ``release.yml`` by
+    ``scripts/verify_container_pins.py``.
+    """
+
+    # ALL_JOBS deliberately includes the handoff and publisher; publication
+    # depends only on REQUIRED_GATE_JOBS and must never need itself.
+    REQUIRED_GATE_JOBS = (
+        "validate-tag",
+        "guards",
+        "dotnet",
+        "web",
+        "python",
+        "e2e",
+        "containers",
+        "browser",
+        "release-bundle",
+        "assemble-evidence",
+    )
+    ALL_JOBS = REQUIRED_GATE_JOBS + ("publish",)
+    REQUIRED_GATE_COMMANDS = (
+        "python scripts/test_repository_guards.py",
+        "python scripts/verify_container_pins.py",
+        "make verify-e2e",
+        "make verify-api",
+        "bash scripts/verify-browser.sh",
+        "bash scripts/verify-release-bundle.sh",
+    )
+    REQUIRED_ARTIFACT_NAMES = (
+        "tracehelix-0.1.0-source.tar.gz",
+        "SHA256SUMS",
+        "RELEASE-MANIFEST.json",
+        "tracehelix-0.1.0-source.cdx.json",
+        "tracehelix-api.spdx.json",
+        "tracehelix-web.spdx.json",
+        "RELEASE-NOTES.md",
+    )
+    TOP_LEVEL_PERMISSIONS = "permissions:\n  contents: read\n"
+    ELEVATED_PERMISSION_LINES = (
+        "      contents: write",
+        "      id-token: write",
+        "      attestations: write",
+    )
+    FORBIDDEN_PERMISSIONS = ("write-all", "permissions: write-all")
+    PUBLISH_JOB_IF = "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')"
+    TAG_VERSION_GUARD = '[[ "$TAG" != "v$VERSION" ]]'
+    TAG_EXTRACTION = 'TAG="${GITHUB_REF#refs/tags/}"'
+    NEVER_OVERWRITE = 'gh release view "$TAG"'
+    PROVENANCE_ACTION = (
+        "actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be"
+    )
+    DOWNLOAD_ACTION = (
+        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
+    )
+    UPLOAD_ACTION = (
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+    )
+    UNIFIED_ARTIFACT = "tracehelix-release-assets"
+
+    def _require_with_mutation(
+        self, path: Path, anchors: tuple[str, ...]
+    ) -> None:
+        text = path.read_text(encoding="utf-8")
+        require_anchors(text, anchors, str(path))
+        for anchor in anchors:
+            with self.subTest(path=path.name, anchor=anchor):
+                tampered = text.replace(anchor, TAMPER_TOKEN)
+                self.assertNotEqual(text, tampered)
+                with self.assertRaises(AssertionError):
+                    require_anchors(tampered, anchors, str(path))
+
+    def _publish_slice(self, workflow: str) -> str:
+        self.assertIn("  publish:\n", workflow)
+        return workflow.split("  publish:\n", 1)[1]
+
+    def test_release_workflow_file_is_present(self) -> None:
+        self.assertTrue(
+            RELEASE_WORKFLOW.is_file(), "missing .github/workflows/release.yml"
+        )
+
+    def test_release_workflow_uses_tag_and_dispatch_triggers_only(self) -> None:
+        self._require_with_mutation(
+            RELEASE_WORKFLOW,
+            ("      - 'v*.*.*'", "  workflow_dispatch:"),
+        )
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("on:\n  push:\n    tags:\n", workflow)
+        # No branch-push or schedule trigger may publish; the only push trigger
+        # is the constrained tag glob.
+        self.assertNotIn("    branches:", workflow.split("jobs:", 1)[0])
+        self.assertNotIn("  schedule:", workflow)
+
+    def test_top_level_permissions_are_read_only(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        header = workflow.split("jobs:", 1)[0]
+        self.assertIn(self.TOP_LEVEL_PERMISSIONS, header)
+        for forbidden in self.FORBIDDEN_PERMISSIONS:
+            self.assertNotIn(forbidden, workflow)
+
+    def test_publish_job_has_exact_elevated_permissions(self) -> None:
+        self._require_with_mutation(
+            RELEASE_WORKFLOW, self.ELEVATED_PERMISSION_LINES
+        )
+        publish = self._publish_slice(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        permissions = publish.split("    permissions:\n", 1)[1].split("\n    steps:", 1)[0]
+        declared = {
+            line.strip() for line in permissions.splitlines() if line.strip()
+        }
+        self.assertEqual(
+            {
+                "contents: write",
+                "id-token: write",
+                "attestations: write",
+            },
+            declared,
+            "publish job must declare exactly the three required elevated scopes",
+        )
+
+    def test_release_workflow_pins_every_github_action_to_a_full_sha(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        references = re.findall(
+            r"uses:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@\S+)",
+            workflow,
+        )
+        self.assertGreaterEqual(
+            len(references),
+            8,
+            "release.yml must reference the required set of pinned actions",
+        )
+        for reference in references:
+            with self.subTest(reference=reference):
+                self.assertRegex(
+                    reference,
+                    r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$",
+                    "release.yml action reference must be owner/repo@full-sha",
+                )
+
+    def test_release_workflow_validates_tag_equals_version(self) -> None:
+        self._require_with_mutation(
+            RELEASE_WORKFLOW,
+            (self.TAG_EXTRACTION, self.TAG_VERSION_GUARD),
+        )
+
+    def test_dispatch_skips_the_entire_elevated_publish_job(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        publish = self._publish_slice(workflow)
+        self.assertIn(f"if: {self.PUBLISH_JOB_IF}", publish)
+        tampered = workflow.replace(self.PUBLISH_JOB_IF, "always()", 1)
+        self.assertNotEqual(workflow, tampered)
+        self.assertNotIn(f"if: {self.PUBLISH_JOB_IF}", tampered)
+
+    def test_publish_never_overwrites_an_existing_release(self) -> None:
+        self._require_with_mutation(RELEASE_WORKFLOW, (self.NEVER_OVERWRITE,))
+
+    def test_publish_needs_all_and_only_required_gates_not_itself(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        publish = self._publish_slice(workflow)
+        needs = publish.split("    needs:\n", 1)[1].split("\n    permissions:", 1)[0]
+        actual = tuple(line.strip()[2:] for line in needs.splitlines() if line.strip())
+        self.assertEqual(self.REQUIRED_GATE_JOBS, actual)
+        self.assertNotIn("publish", actual)
+
+    def test_release_workflow_defines_all_jobs_and_required_gate_jobs(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        for job in self.ALL_JOBS:
+            with self.subTest(job=job):
+                self.assertIn(f"  {job}:\n", workflow)
+        self.assertNotIn("publish", self.REQUIRED_GATE_JOBS)
+        for command in self.REQUIRED_GATE_COMMANDS:
+            with self.subTest(command=command):
+                self.assertIn(command, workflow)
+
+    def test_release_workflow_base_loader_shape_and_read_only_dispatch_jobs(self) -> None:
+        workflow = yaml.load(
+            RELEASE_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+        )
+        self.assertEqual({"name", "on", "permissions", "concurrency", "jobs"}, set(workflow))
+        self.assertIn("workflow_dispatch", workflow["on"])
+        self.assertEqual(set(self.ALL_JOBS), set(workflow["jobs"]))
+        self.assertEqual("always()", workflow["jobs"]["assemble-evidence"]["if"])
+        self.assertEqual(
+            list(self.REQUIRED_GATE_JOBS[:-1]),
+            workflow["jobs"]["assemble-evidence"]["needs"],
+        )
+        for name, job in workflow["jobs"].items():
+            with self.subTest(job=name):
+                permissions = job.get("permissions", {"contents": "read"})
+                if name == "publish":
+                    self.assertEqual(
+                        {"contents": "write", "id-token": "write", "attestations": "write"},
+                        permissions,
+                    )
+                    self.assertEqual(self.PUBLISH_JOB_IF, job["if"])
+                else:
+                    self.assertEqual({"contents": "read"}, permissions)
+
+    def test_release_bundle_uses_only_the_canonical_verified_export(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        bundle = workflow.split("  release-bundle:\n", 1)[1].split(
+            "\n  assemble-evidence:\n", 1
+        )[0]
+        self.assertIn("TRACEHELIX_VERIFIED_OUTPUT_DIR", bundle)
+        canonical_at = bundle.index("bash scripts/verify-release-bundle.sh")
+        notes_at = bundle.index("Generate release notes after canonical export")
+        self.assertGreater(notes_at, canonical_at)
+        self.assertNotIn("build_release_bundle.py", bundle[canonical_at:])
+        self.assertIn("Generate source CycloneDX SBOM", bundle[canonical_at:])
+
+    def test_assemble_evidence_has_exact_handoff_and_publish_downloads_only_it(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        assemble = workflow.split("  assemble-evidence:\n", 1)[1].split("\n  publish:\n", 1)[0]
+        for artifact in (
+            "tracehelix-release-evidence",
+            "tracehelix-0.1.0-source.cdx.json",
+            "tracehelix-api.spdx.json",
+            "tracehelix-web.spdx.json",
+            self.UNIFIED_ARTIFACT,
+        ):
+            with self.subTest(artifact=artifact):
+                self.assertIn(artifact, assemble)
+        self.assertIn("Assert exact artifact set and verify source checksum", assemble)
+        self.assertIn("sha256sum -c SHA256SUMS", assemble)
+        self.assertIn("VERSION: ${{ needs.validate-tag.outputs.version }}", assemble)
+        self.assertNotIn("< VERSION", assemble)
+        publish = self._publish_slice(workflow)
+        self.assertEqual(1, publish.count("actions/download-artifact@"))
+        self.assertNotIn("actions/checkout@", publish)
+
+    def test_source_sbom_is_generated_from_a_strictly_reverified_archive(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        bundle = workflow.split("  release-bundle:\n", 1)[1].split(
+            "\n  assemble-evidence:\n", 1
+        )[0]
+        verify_at = bundle.index("Re-verify and extract source for the SBOM")
+        sbom_at = bundle.index("Generate source CycloneDX SBOM")
+        self.assertLess(verify_at, sbom_at)
+        between = bundle[verify_at:sbom_at]
+        self.assertIn("scripts/verify_release_bundle.py", between)
+        self.assertIn("--checksums", between)
+        self.assertIn("--extract-dir", between)
+        sbom = bundle[sbom_at:]
+        self.assertIn("path: ${{ runner.temp }}/sbom-source/tracehelix-0.1.0", sbom)
+        self.assertNotIn("path: .\n", sbom)
+
+    def test_publish_attaches_release_notes_as_an_immutable_asset(self) -> None:
+        publish = self._publish_slice(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        create = publish.split('gh release create "$TAG"', 1)[1]
+        self.assertIn("--notes-file release/RELEASE-NOTES.md", create)
+        self.assertIn("\n            release/RELEASE-NOTES.md \\", create)
+        self.assertEqual(2, create.count("release/RELEASE-NOTES.md"))
+
+    def test_publish_uses_immutable_artifact_handoff_without_rebuild(self) -> None:
+        self._require_with_mutation(
+            RELEASE_WORKFLOW, (self.UPLOAD_ACTION, self.DOWNLOAD_ACTION)
+        )
+        publish = self._publish_slice(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        self.assertIn(self.DOWNLOAD_ACTION, publish)
+        self.assertIn(
+            "Download immutable unified release assets",
+            publish,
+            "publish must consume only the unified assembled artifact",
+        )
+        self.assertIn(f"name: {self.UNIFIED_ARTIFACT}", publish)
+        self.assertNotIn(
+            "build_release_bundle.py",
+            publish,
+            "publish must not rebuild an unaudited bundle",
+        )
+
+    def test_release_workflow_includes_the_required_artifact_set(self) -> None:
+        self._require_with_mutation(
+            RELEASE_WORKFLOW, self.REQUIRED_ARTIFACT_NAMES
+        )
+
+    def test_release_workflow_creates_checksums_provenance_and_attestation(
+        self,
+    ) -> None:
+        self._require_with_mutation(
+            RELEASE_WORKFLOW,
+            ("sha256sum -c SHA256SUMS", self.PROVENANCE_ACTION),
+        )
+
+
+class ReleasePolicyGuardTests(unittest.TestCase):
+    """Guard docs/release-policy.md for honest, fail-closed release claims."""
+
+    REQUIRED_ANCHORS = (
+        "docs/release-policy.md",
+        "fail-closed",
+        "local trusted single-user",
+        "not production-grade",
+        "tag equals VERSION",
+        "never overwrite",
+        "contents: read",
+        "contents: write, id-token: write, attestations: write",
+        "workflow_dispatch",
+        "never publishes",
+        "immutable",
+        "download-artifact",
+        "CycloneDX",
+        "SPDX",
+        "provenance",
+        "attestation",
+        "public-download verification",
+        "no release has been created",
+    )
+    FORBIDDEN_OVERCLAIM_PHRASES = (
+        "is production-grade",
+        "publicly available",
+        "has been published",
+    )
+
+    def _require_with_mutation(
+        self, path: Path, anchors: tuple[str, ...]
+    ) -> None:
+        text = path.read_text(encoding="utf-8")
+        require_anchors(text, anchors, str(path))
+        for anchor in anchors:
+            with self.subTest(path=path.name, anchor=anchor):
+                tampered = text.replace(anchor, TAMPER_TOKEN)
+                self.assertNotEqual(text, tampered)
+                with self.assertRaises(AssertionError):
+                    require_anchors(tampered, anchors, str(path))
+
+    def test_release_policy_file_is_present(self) -> None:
+        self.assertTrue(
+            RELEASE_POLICY_MD.is_file(), "missing docs/release-policy.md"
+        )
+
+    def test_release_policy_preserves_required_anchors(self) -> None:
+        self._require_with_mutation(RELEASE_POLICY_MD, self.REQUIRED_ANCHORS)
+
+    def test_release_policy_makes_no_production_or_publication_overclaim(self) -> None:
+        text = RELEASE_POLICY_MD.read_text(encoding="utf-8")
+        forbid_phrases(text, self.FORBIDDEN_OVERCLAIM_PHRASES, str(RELEASE_POLICY_MD))
+        for phrase in self.FORBIDDEN_OVERCLAIM_PHRASES:
+            with self.subTest(phrase=phrase):
+                with self.assertRaises(AssertionError):
+                    forbid_phrases(text + phrase, self.FORBIDDEN_OVERCLAIM_PHRASES, str(RELEASE_POLICY_MD))
 
 
 if __name__ == "__main__":

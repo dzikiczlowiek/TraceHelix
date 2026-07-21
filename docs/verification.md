@@ -35,6 +35,57 @@ CI runs on pushes to `main` and on every pull request. GitHub Actions, setup run
 
 The container and release-bundle gates expect BuildKit/Docker access and network access to resolve exact pinned dependencies. The release bundle itself is deterministic and contains only eligible committed source plus `RELEASE-MANIFEST.json`; `.hermes`, caches, build/test/browser outputs, local databases/bytecode, environment files, and private imports are excluded by both builder and verifier. Dependencies are restored from lock files during the extracted-artifact smoke. Runtime trace analysis and training tests remain deterministic and offline; no gate makes a live AI or network model call.
 
+## Release workflow proof
+
+No public GitHub Release exists yet. The release workflow is available for a
+read-only dispatch proof from `main`; dispatch runs every gate and assembles
+workflow evidence, but the job with write scopes is skipped:
+
+```bash
+gh workflow run release.yml --ref main
+gh run watch
+RUN_ID=$(gh run list --workflow release.yml --branch main --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run download "$RUN_ID" --name tracehelix-release-assets --dir /tmp/tracehelix-release-proof
+gh release list
+```
+
+Record the run URL, successful gate list, downloaded `tracehelix-release-assets`
+file inventory, and the final empty `gh release list` (or the absence of a new
+release) as the no-release assertion. The unified evidence must contain exactly
+the source archive, `SHA256SUMS`, `RELEASE-MANIFEST.json`, release notes, and
+source/API/web SBOMs; `sha256sum -c SHA256SUMS` must pass in that download.
+
+After an independent exact-snapshot review, create and push only a matching tag:
+
+```bash
+VERSION=$(tr -d '\r\n' < VERSION)
+git tag "v$VERSION"
+git push origin "v$VERSION"
+gh run watch
+```
+
+Only that pushed `refs/tags/v<VERSION>` event starts `publish`; it downloads the
+assembled evidence and never rebuilds the archive. After a future release is
+visible, verify as an anonymous/public consumer in a fresh directory (do not
+send a GitHub token):
+
+```bash
+mkdir -p /tmp/tracehelix-public-check && cd /tmp/tracehelix-public-check
+BASE="https://github.com/dzikiczlowiek/TraceHelix/releases/download/v$VERSION"
+curl -fLO "$BASE/tracehelix-${VERSION}-source.tar.gz"
+curl -fLO "$BASE/SHA256SUMS"
+curl -fLO "$BASE/RELEASE-MANIFEST.json"
+sha256sum -c SHA256SUMS
+tar -xzf "tracehelix-${VERSION}-source.tar.gz"
+cd "tracehelix-${VERSION}"
+python3 scripts/test_repository_guards.py
+python3 scripts/verify_container_pins.py
+```
+
+Use a fresh clone or extracted archive for the remaining consumer checks rather
+than trusting the releasing checkout. Verify the published provenance attestation
+against the archive digest before relying on the downloaded asset.
+
 ## Exact-snapshot review
 
 Use `python scripts/source_fingerprint.py` before and after every independent review, and once more after staging. The v2 fingerprint binds:

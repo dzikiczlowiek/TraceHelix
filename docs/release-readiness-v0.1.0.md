@@ -42,7 +42,7 @@ source release.
 | P1-9 | Core reads trust aggregate JSON and do not validate indexes | open-deferred | Normal read paths deserialize `data_json` without cross-checking `event_index`/`alert_index`; the indexes are written on save but not validated on read; there is no `quick_check`/`integrity` policy or rebuild workflow. The candidate exporter has stronger corruption checks than the application read path. | Latent index/aggregate divergence is not detected on the normal read path; there is no supported repair workflow. |
 | P1-10 | Report output accepts SQLite-reserved sidecar paths | open-deferred | `src/TraceHelix.Cli/CliProgram.cs` `Report` rejects only exact `db == out` equality (`NormalizePath` plus `string.Equals`); it does not reject `<db>-wal`, `<db>-shm`, or `<db>-journal`. | A report `--out` can collide with SQLite's reserved sidecar namespace. Choose report paths outside the database namespace. |
 | P1-11 | No self-contained, tested production distribution | partially closed | `scripts/build_release_bundle.py` now creates a deterministic `tracehelix-0.1.0-source.tar.gz` and canonical `SHA256SUMS` from one resolved commit; two builds must be byte-identical. `scripts/verify_release_bundle.py` verifies checksum, gzip/tar/path/type/boundary invariants, and every manifest hash before safe extraction. `scripts/verify-release-bundle.sh` then restores locked dependencies and runs policy, digest-pinned Compose lifecycle, and real Chromium acceptance from the extracted artifact, with a bounded `Release bundle acceptance` CI job. The API still does not serve `web/dist`, dependencies are restored rather than vendored, and the training exporter remains an external `uv`/PATH workflow. There is no public tag/release, signed checksum/provenance, self-contained binary, installer, or service unit yet. | Deterministic local source-artifact and install-from-artifact evidence now exist; public release/download verification and signing remain follow-ups. |
-| P1-12 | Repository and release governance did not enforce the tested state | partially closed | This change set adds `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `.github/CODEOWNERS`, `.github/pull_request_template.md`, this readiness map, and repository guards for version agreement and required files/anchors. CI already builds both images, generates SBOMs (`anchore/sbom-action`), and rejects HIGH/CRITICAL OS/library vulnerabilities (`trivy-action`). Branch protection, secret scanning, CodeQL/SAST, artifact signing, and provenance remain operator-side follow-ups and are not enforceable from this repository. | Governance documents and supply-chain scans exist; full branch/secret/SAST/signing enforcement is not part of this source release. |
+| P1-12 | Repository and release governance did not enforce the tested state | partially closed | This change set adds `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `.github/CODEOWNERS`, `.github/pull_request_template.md`, this readiness map, repository guards, and a fail-closed tag-only release workflow with read-only defaults, immutable action pins, SBOM/vulnerability gates, exact artifact handoff, and tag-only publication permissions. Repository secret scanning and push protection are enabled. Branch protection/rulesets, CodeQL/SAST, a completed provenance attestation, and public artifact verification remain operator-side follow-ups. | Governance, supply-chain scans, and repository-enforced release gates exist; hosted protection and public-release evidence still require operator configuration and execution. |
 
 ## Explicit open limitations (confirmed by current code/docs)
 
@@ -63,9 +63,10 @@ source release.
 - **No live AI/ML.** Analysis is deterministic rules plus six versioned
   detectors; training is an offline export/validation shell only.
 - **No published release artifact.** A deterministic local source bundle is
-  verified and exercised end-to-end after extraction, but there is no public tag,
-  signed checksum/provenance, release workflow, or downloaded-public-artifact
-  verification yet (P1-11).
+  verified and exercised end-to-end after extraction, and a fail-closed
+  tag-only release workflow is present. There is still no public tag, completed
+  provenance attestation, or downloaded-public-artifact verification yet
+  (P1-11).
 - **No upload or arbitrary file browsing.** Raw input is never served as an
   arbitrary file path.
 

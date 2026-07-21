@@ -1,0 +1,484 @@
+name: Release
+
+# Fail-closed release workflow. workflow_dispatch exercises every read-only
+# gate and assembles evidence but never starts publish: only a pushed tag can
+# receive the job's narrowly elevated token.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      is_tag: ${{ steps.tag.outputs.is_tag }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Validate tag equals VERSION exactly
+        id: tag
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '\r\n' < VERSION)"
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "VERSION is not canonical SemVer: $VERSION" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            if [[ "$TAG" != "v$VERSION" ]]; then
+              echo "tag $TAG does not equal v$VERSION" >&2
+              exit 1
+            fi
+            echo "is_tag=true" >> "$GITHUB_OUTPUT"
+          else
+            [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]] || {
+              echo "unexpected event ${GITHUB_EVENT_NAME} on a non-tag ref" >&2
+              exit 1
+            }
+            echo "is_tag=false" >> "$GITHUB_OUTPUT"
+            echo "workflow_dispatch is a dry-run: dispatch never publishes"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  guards:
+    name: Repository guards and pin verifier
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Verify repository security guards
+        run: python scripts/test_repository_guards.py
+      - name: Verify external build dependency pins
+        run: python scripts/verify_container_pins.py
+
+  dotnet:
+    name: .NET build and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0
+        with:
+          global-json-file: global.json
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
+        with:
+          version: 0.11.29
+          python-version: '3.11.15'
+          enable-cache: true
+          cache-dependency-glob: training/uv.lock
+      - name: Install locked exporter dependencies
+        run: uv sync --locked --project training
+      - name: Restore locked dependencies
+        run: dotnet restore TraceHelix.slnx --locked-mode
+      - name: Verify formatting
+        run: dotnet format TraceHelix.slnx --verify-no-changes --no-restore
+      - name: Build Release
+        run: dotnet build TraceHelix.slnx --configuration Release --no-restore
+      - name: Test Release
+        run: dotnet test TraceHelix.slnx --configuration Release --no-build --no-restore
+
+  web:
+    name: Web build and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up .NET 10 for contract generation
+        uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0
+        with:
+          global-json-file: global.json
+      - name: Set up Node.js 24
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 24.18.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Restore API contract generator dependencies (locked)
+        run: dotnet restore ../src/TraceHelix.Api/TraceHelix.Api.csproj --locked-mode
+      - name: Check generated API contract
+        run: npm run check:api
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npm exec -- vitest run
+      - name: Build
+        run: npm run build
+      - name: Audit production and development dependencies
+        run: npm audit --audit-level=high
+
+  python:
+    name: Python training
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: training
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
+        with:
+          version: 0.11.29
+          python-version: '3.11.15'
+          enable-cache: true
+          cache-dependency-glob: training/uv.lock
+      - name: Install locked dependencies
+        run: uv sync --locked
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Mypy
+        run: uv run mypy .
+      - name: Pytest
+        run: uv run pytest
+
+  e2e:
+    name: Real-process end-to-end and API
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0
+        with:
+          global-json-file: global.json
+      - name: Restore locked dependencies
+        run: dotnet restore TraceHelix.slnx --locked-mode
+      - name: Build Release
+        run: dotnet build TraceHelix.slnx --configuration Release --no-restore
+      - name: Verify CLI real-process workflow
+        run: make verify-e2e
+      - name: Verify API real-process workflow
+        run: make verify-api
+
+  containers:
+    name: Container build, SBOMs, and vulnerability gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Build digest-pinned production images
+        run: docker compose --profile tools build --pull
+      - name: Generate API SBOM
+        uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11 # v0.23.0
+        with:
+          image: tracehelix-api:local
+          artifact-name: tracehelix-api.spdx.json
+          format: spdx-json
+          syft-version: v1.42.3
+          upload-artifact-retention: 14
+          upload-release-assets: false
+      - name: Generate web SBOM
+        uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11 # v0.23.0
+        with:
+          image: tracehelix-web:local
+          artifact-name: tracehelix-web.spdx.json
+          format: spdx-json
+          syft-version: v1.42.3
+          upload-artifact-retention: 14
+          upload-release-assets: false
+      - name: Scan API image for high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: tracehelix-api:local
+          version: v0.72.0
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+          exit-code: 1
+      - name: Scan web image for high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: tracehelix-web:local
+          version: v0.72.0
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+          exit-code: 1
+          skip-setup-trivy: true
+
+  browser:
+    name: Browser acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Node.js 24
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 24.18.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install locked web dependencies
+        run: npm ci
+        working-directory: web
+      - name: Install Playwright Chromium and OS dependencies
+        run: npm exec --offline -- playwright install --with-deps chromium
+        working-directory: web
+      - name: Verify browser acceptance through the real production topology
+        run: bash scripts/verify-browser.sh
+
+  release-bundle:
+    name: Deterministic extracted release-bundle acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Node.js 24
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 24.18.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install locked web dependencies
+        run: npm ci
+        working-directory: web
+      - name: Install Playwright Chromium and OS dependencies
+        run: npm exec --offline -- playwright install --with-deps chromium
+        working-directory: web
+      - name: Build twice, verify, and export the canonical release artifact set
+        env:
+          TRACEHELIX_VERIFIED_OUTPUT_DIR: ${{ runner.temp }}/release-export
+        run: |
+          set -euo pipefail
+          mkdir -m 700 "$TRACEHELIX_VERIFIED_OUTPUT_DIR"
+          bash scripts/verify-release-bundle.sh
+      - name: Generate release notes after canonical export
+        env:
+          EXPORT_DIR: ${{ runner.temp }}/release-export
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '\r\n' < VERSION)"
+          ARCHIVE="tracehelix-${VERSION}-source.tar.gz"
+          for required in "$ARCHIVE" SHA256SUMS RELEASE-MANIFEST.json; do
+            [[ -f "$EXPORT_DIR/$required" ]] || {
+              echo "canonical release artifact $required is missing from $EXPORT_DIR" >&2
+              exit 1
+            }
+          done
+          {
+            printf '%s\n' "# TraceHelix ${VERSION}"
+            printf '\n'
+            printf '%s\n' "Local trusted single-user source release. Not production-grade; not a"
+            printf '%s\n' "network, multi-user, or SaaS service. See docs/release-readiness-v0.1.0.md"
+            printf '%s\n' "for scope, limitations, and docs/release-policy.md for the fail-closed"
+            printf '%s\n' "release contract. Verify with sha256sum -c SHA256SUMS, then re-run the"
+            printf '%s\n' "repository guards and release-bundle verifier from extracted source."
+          } > "$EXPORT_DIR/RELEASE-NOTES.md"
+      - name: Re-verify and extract source for the SBOM
+        env:
+          EXPORT_DIR: ${{ runner.temp }}/release-export
+          SBOM_EXTRACT_DIR: ${{ runner.temp }}/sbom-source
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '\r\n' < VERSION)"
+          ARCHIVE="tracehelix-${VERSION}-source.tar.gz"
+          [[ ! -e "$SBOM_EXTRACT_DIR" ]] || {
+            echo "SBOM extraction destination already exists: $SBOM_EXTRACT_DIR" >&2
+            exit 1
+          }
+          python3 scripts/verify_release_bundle.py \
+            --archive "$EXPORT_DIR/$ARCHIVE" \
+            --checksums "$EXPORT_DIR/SHA256SUMS" \
+            --extract-dir "$SBOM_EXTRACT_DIR"
+      - name: Generate source CycloneDX SBOM from the verified commit
+        uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11 # v0.23.0
+        with:
+          path: ${{ runner.temp }}/sbom-source/tracehelix-0.1.0
+          artifact-name: tracehelix-0.1.0-source.cdx.json
+          format: cyclonedx-json
+          syft-version: v1.42.3
+          upload-artifact-retention: 14
+          upload-release-assets: false
+      - name: Upload immutable release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tracehelix-release-evidence
+          path: |
+            ${{ runner.temp }}/release-export/tracehelix-0.1.0-source.tar.gz
+            ${{ runner.temp }}/release-export/SHA256SUMS
+            ${{ runner.temp }}/release-export/RELEASE-MANIFEST.json
+            ${{ runner.temp }}/release-export/RELEASE-NOTES.md
+          if-no-files-found: error
+          retention-days: 14
+
+  assemble-evidence:
+    name: Assemble immutable unified release assets (read-only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs:
+      - validate-tag
+      - guards
+      - dotnet
+      - web
+      - python
+      - e2e
+      - containers
+      - browser
+      - release-bundle
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Fail unless every required producer and gate succeeded
+        run: |
+          set -euo pipefail
+          for item in \
+            "validate-tag=${{ needs.validate-tag.result }}" \
+            "guards=${{ needs.guards.result }}" \
+            "dotnet=${{ needs.dotnet.result }}" \
+            "web=${{ needs.web.result }}" \
+            "python=${{ needs.python.result }}" \
+            "e2e=${{ needs.e2e.result }}" \
+            "containers=${{ needs.containers.result }}" \
+            "browser=${{ needs.browser.result }}" \
+            "release-bundle=${{ needs.release-bundle.result }}"; do
+            job="${item%%=*}"
+            result="${item#*=}"
+            [[ "$result" == success ]] || {
+              echo "required job $job did not succeed (result=$result)" >&2
+              exit 1
+            }
+          done
+      - name: Download immutable release evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tracehelix-release-evidence
+          path: unified
+      - name: Download source CycloneDX SBOM
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tracehelix-0.1.0-source.cdx.json
+          path: unified
+      - name: Download API SPDX SBOM
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tracehelix-api.spdx.json
+          path: unified
+      - name: Download web SPDX SBOM
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tracehelix-web.spdx.json
+          path: unified
+      - name: Assert exact artifact set and verify source checksum
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo "validated VERSION output is not canonical SemVer: $VERSION" >&2
+            exit 1
+          }
+          ARCHIVE="tracehelix-${VERSION}-source.tar.gz"
+          expected=$(printf '%s\n' \
+            "$ARCHIVE" SHA256SUMS RELEASE-MANIFEST.json RELEASE-NOTES.md \
+            "tracehelix-${VERSION}-source.cdx.json" \
+            tracehelix-api.spdx.json tracehelix-web.spdx.json | LC_ALL=C sort)
+          [[ -z "$(find unified -mindepth 1 ! -type f -print -quit)" ]] || {
+            echo "unified artifact handoff must be flat regular files" >&2
+            exit 1
+          }
+          actual=$(find unified -mindepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          [[ "$actual" == "$expected" ]] || {
+            printf 'unexpected unified artifact set:\n%s\n' "$actual" >&2
+            exit 1
+          }
+          ( cd unified && sha256sum -c SHA256SUMS )
+      - name: Upload immutable unified release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tracehelix-release-assets
+          path: unified
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub release (tag only)
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs:
+      - validate-tag
+      - guards
+      - dotnet
+      - web
+      - python
+      - e2e
+      - containers
+      - browser
+      - release-bundle
+      - assemble-evidence
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download immutable unified release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tracehelix-release-assets
+          path: release
+      - name: Re-verify checksum and refuse to overwrite an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          ARCHIVE="tracehelix-${VERSION}-source.tar.gz"
+          TAG="${GITHUB_REF#refs/tags/}"
+          [[ "$TAG" == "v$VERSION" ]] || { echo "tag $TAG != v$VERSION" >&2; exit 1; }
+          ( cd release && sha256sum -c SHA256SUMS )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists; refusing to overwrite" >&2
+            exit 1
+          fi
+      - name: Attest build provenance for the source archive
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: release/tracehelix-${{ needs.validate-tag.outputs.version }}-source.tar.gz
+      - name: Create the GitHub release (tag only, never overwrite)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          ARCHIVE="tracehelix-${VERSION}-source.tar.gz"
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "TraceHelix ${VERSION}" \
+            --notes-file release/RELEASE-NOTES.md \
+            "release/$ARCHIVE" \
+            release/SHA256SUMS \
+            release/RELEASE-MANIFEST.json \
+            release/RELEASE-NOTES.md \
+            "release/tracehelix-${VERSION}-source.cdx.json" \
+            release/tracehelix-api.spdx.json \
+            release/tracehelix-web.spdx.json
