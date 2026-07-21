@@ -1,0 +1,45 @@
+# Changelog
+
+All notable changes to TraceHelix are recorded here. The format is based on
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
+adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The
+authoritative version sources are `VERSION`, `Directory.Build.props`
+(`VersionPrefix`), `web/package.json`, and `training/pyproject.toml`, held to
+exact equality by `scripts/test_repository_guards.py`.
+
+## [Unreleased]
+
+### Added
+- Authoritative `VERSION` file and `Directory.Build.props` `VersionPrefix`, held
+  to exact equality with `web/package.json` and `training/pyproject.toml` by
+  repository guards with mutation tests.
+- Release-readiness map (`docs/release-readiness-v0.1.0.md`) and bounded `v0.1.0`
+  scope caveats in `README.md` and `docs/architecture.md`.
+- Governance baseline: `SECURITY.md`, `CONTRIBUTING.md`, `.github/CODEOWNERS`,
+  and `.github/pull_request_template.md`.
+- Repository guards for version agreement, required governance/release file
+  presence, and stable release-scope anchors (with mutation tests).
+
+## [0.1.0]
+
+Planned local, single-user source release. Not yet tagged or published; no
+release date is committed. This entry describes the intended scope of the first
+source release and is not a release announcement.
+
+### Scope
+- Local trusted single-user analyzer; loopback-only v1 API and accessible React
+  run browser.
+- Generic JSONL import into SQLite, deterministic rules analysis, append-only
+  analysis revisions, independent run comparison, and fail-closed JSON/HTML
+  reports.
+- Offline training-package export shell with the closed `redaction-v1` policy.
+
+### Known open limitations
+- Not production-grade: no authentication against a hostile local process;
+  unversioned SQLite schema with no migration, backup, restore, or retention
+  lifecycle; aggregate-deserialization query-scale limits; non-idempotent
+  analysis revisions; and default reports that still serialize raw trace content
+  under ambient file permissions.
+- Not a network, multi-user, or SaaS service; do not reverse-proxy or expose it.
+- No upload, arbitrary file browsing, live AI/ML, ONNX inference, or browser
+  Playwright coverage.

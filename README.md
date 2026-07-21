@@ -2,6 +2,21 @@
 
 TraceHelix is a local, auditable analyzer for AI-agent execution traces. It imports generic JSONL into SQLite, applies deterministic step labels and evidence-linked detectors, compares runs, and exposes a loopback-only v1 API and accessible React run browser. Analysis requests create append-only deterministic revisions; TraceHelix makes no causal claims.
 
+## Release scope (v0.1.0)
+
+TraceHelix `v0.1.0` is a planned **local trusted single-user source release**.
+It is an auditable, portfolio-ready source tree; it is **not production-grade**
+and **not yet tagged** or published. It runs loopback-only on a single trusted
+workstation and is **not a network, multi-user, or SaaS service**: do not
+reverse-proxy it, expose it to a network, or run it on a host shared with an
+untrusted process. It provides no authentication against a hostile local process
+and no schema migration, backup, restore, retention, upload, live AI/ML, or
+arbitrary file-browsing capability. The twelve-finding status map and explicit
+open limitations are in [`docs/release-readiness-v0.1.0.md`](docs/release-readiness-v0.1.0.md).
+
+Governance: [`SECURITY.md`](SECURITY.md), [`CONTRIBUTING.md`](CONTRIBUTING.md),
+[`CHANGELOG.md`](CHANGELOG.md).
+
 ## Prerequisites
 
 - .NET SDK 10.0.302 exactly (enforced by `global.json`; install this SDK before running host commands)
