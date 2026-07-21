@@ -32,12 +32,20 @@ exact equality by `scripts/test_repository_guards.py`.
   job.
 - Canonical local browser-acceptance command in `README.md` and
   `docs/verification.md`.
+- Deterministic Git-object source bundle builder with canonical gzip/tar metadata,
+  generated `RELEASE-MANIFEST.json`, and `SHA256SUMS` sidecar.
+- Fail-closed bundle verifier and safe extractor with adversarial coverage for
+  checksums, archive boundaries, paths, types, metadata, manifests, bounds, and
+  partial-write cleanup.
+- Canonical install-from-artifact gate that builds twice, compares bytes, then
+  runs policy, digest-pinned Compose lifecycle, and Playwright from the verified
+  extracted source; also wired as the bounded `Release bundle acceptance` CI job.
 
 ### Changed
-- `docs/release-readiness-v0.1.0.md` P1-11 moved to `partially closed`: the
-  source-built container topology is now exercised in a real browser. The
-  deterministic release bundle, tag, release workflow, and install-from-artifact
-  evidence remain absent.
+- `docs/release-readiness-v0.1.0.md` P1-11 remains `partially closed`: deterministic
+  local source-bundle and install-from-artifact evidence now exist, while the
+  public tag/release, downloaded-public-artifact verification, and signing remain
+  follow-ups.
 
 ## [0.1.0]
 

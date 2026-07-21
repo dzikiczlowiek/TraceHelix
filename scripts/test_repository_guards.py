@@ -39,6 +39,11 @@ ARCHITECTURE = ROOT / "docs" / "architecture.md"
 BROWSER_VERIFIER = ROOT / "scripts" / "verify-browser.sh"
 PLAYWRIGHT_CONFIG = ROOT / "web" / "playwright.config.ts"
 E2E_SPEC = ROOT / "web" / "e2e" / "release.spec.ts"
+BUNDLE_BUILDER = ROOT / "scripts" / "build_release_bundle.py"
+BUNDLE_BUILDER_TESTS = ROOT / "scripts" / "test_build_release_bundle.py"
+BUNDLE_VERIFIER = ROOT / "scripts" / "verify_release_bundle.py"
+BUNDLE_VERIFIER_TESTS = ROOT / "scripts" / "test_verify_release_bundle.py"
+BUNDLE_ACCEPTANCE = ROOT / "scripts" / "verify-release-bundle.sh"
 
 # Canonical SemVer 2.0.0 (optional but valid prerelease/build metadata). The
 # cross-source equality check, not this pattern alone, pins a release value.
@@ -1021,6 +1026,80 @@ class BrowserAcceptanceGuardTests(unittest.TestCase):
 
     def test_readme_documents_browser_acceptance(self) -> None:
         self._require_anchors_with_mutation(README, self.README_BROWSER_ANCHORS)
+
+
+class ReleaseBundleGuardTests(unittest.TestCase):
+    """Guard deterministic bundle creation, verification, and artifact smoke."""
+
+    REQUIRED_FILES = (
+        BUNDLE_BUILDER,
+        BUNDLE_BUILDER_TESTS,
+        BUNDLE_VERIFIER,
+        BUNDLE_VERIFIER_TESTS,
+        BUNDLE_ACCEPTANCE,
+    )
+    CI_ANCHORS = (
+        "  release-bundle:",
+        "name: Release bundle acceptance",
+        "timeout-minutes: 35",
+        "bash scripts/verify-release-bundle.sh",
+        "npm exec -- playwright install --with-deps chromium",
+    )
+    SCRIPT_ANCHORS = (
+        "build_release_bundle.py",
+        'cmp "$OUT_A/$ARCHIVE" "$OUT_B/$ARCHIVE"',
+        "verify_release_bundle.py",
+        'SOURCE="$EXTRACT/tracehelix-$VERSION"',
+        "scripts/test_repository_guards.py",
+        "docker compose --profile tools build --pull",
+        "bash scripts/verify-compose-lifecycle.sh",
+        "bash scripts/verify-browser.sh",
+    )
+    README_ANCHORS = (
+        "Deterministic release bundle",
+        'sg docker -c "bash scripts/verify-release-bundle.sh"',
+        "Release bundle acceptance",
+        "install-from-artifact evidence",
+    )
+    VERIFICATION_ANCHORS = (
+        "Release bundle acceptance",
+        'sg docker -c "bash scripts/verify-release-bundle.sh"',
+        "Two byte-identical source bundles",
+    )
+    READINESS_ANCHORS = (
+        "deterministic local source bundle",
+        "install-from-artifact evidence",
+        "no public tag",
+    )
+
+    def _require_with_mutation(self, path: Path, anchors: tuple[str, ...]) -> None:
+        text = path.read_text(encoding="utf-8")
+        require_anchors(text, anchors, str(path))
+        for anchor in anchors:
+            with self.subTest(path=path.name, anchor=anchor):
+                tampered = text.replace(anchor, TAMPER_TOKEN)
+                self.assertNotEqual(text, tampered)
+                with self.assertRaises(AssertionError):
+                    require_anchors(tampered, anchors, str(path))
+
+    def test_bundle_files_are_present(self) -> None:
+        missing = [str(path) for path in self.REQUIRED_FILES if not path.is_file()]
+        self.assertEqual([], missing, f"missing release bundle files: {missing}")
+
+    def test_ci_release_bundle_job_is_required(self) -> None:
+        self._require_with_mutation(WORKFLOW, self.CI_ANCHORS)
+
+    def test_acceptance_script_preserves_extracted_artifact_contract(self) -> None:
+        self._require_with_mutation(BUNDLE_ACCEPTANCE, self.SCRIPT_ANCHORS)
+
+    def test_readme_documents_bundle_without_public_release_overclaim(self) -> None:
+        self._require_with_mutation(README, self.README_ANCHORS)
+
+    def test_verification_documents_canonical_bundle_command(self) -> None:
+        self._require_with_mutation(VERIFICATION_MD, self.VERIFICATION_ANCHORS)
+
+    def test_readiness_records_local_evidence_and_public_followup(self) -> None:
+        self._require_with_mutation(RELEASE_READINESS, self.READINESS_ANCHORS)
 
 
 if __name__ == "__main__":
