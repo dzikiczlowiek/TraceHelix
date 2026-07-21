@@ -16,6 +16,8 @@ The initial preferred SQLite dependency restore failed because `SQLitePCLRaw.lib
 
 `scripts/verify-compose-lifecycle.sh` starts Compose on a unique loopback port and verifies health, API isolation, edge routing, restart recovery, force-recreate recovery, Docker DNS re-resolution, container hardening, CLI network isolation, owner-only SQLite permissions, foreign-Origin mutation rejection without persistence, and successful same-origin mutation through the real nginx proxy.
 
+`scripts/verify-browser.sh` is the canonical browser acceptance verifier. From a clean state it builds the digest-pinned production images, brings up the real Docker Compose topology (nginx web -> API -> SQLite) on an ephemeral loopback port, seeds two committed synthetic JSONL traces through the real containerized CLI, and runs the Playwright Chromium suite (`web/e2e/release.spec.ts`) against nginx with no implicit dev server. It is fail-closed on teardown: a failed teardown or any project-labelled container/network/volume residue turns a green Playwright run into a hard failure. Every Docker command is scoped to a unique `tracehelix-browser-<pid>` project, so no foreign Docker project is ever matched or actioned.
+
 ## Local and CI gates
 
 CI runs on pushes to `main` and on every pull request. GitHub Actions, setup runtimes, security tools, and external container/stage references are checked against exact repository allowlists. The `ubuntu-24.04` and `windows-2025` hosted-runner labels avoid `latest` aliases, but GitHub can update the underlying VM images; CI runner hosts are not content-addressed.
@@ -28,8 +30,10 @@ CI runs on pushes to `main` and on every pull request. GitHub Actions, setup run
 | Web | Locked install, generated OpenAPI contract gate, ESLint, TypeScript, Vitest/jsdom, production build, and high-severity dependency audit | `cd web && npm ci && npm run lint && npm run check:api && npm run typecheck && npm exec -- vitest run && npm run build && npm audit --audit-level=high` |
 | Python training | Locked uv environment, Ruff, strict mypy, and pytest | `cd training && uv sync --locked && uv run ruff check . && uv run mypy . && uv run pytest` |
 | Containers | Digest-pinned build, Compose restart/recreate lifecycle, API and web SBOMs, Trivy HIGH/CRITICAL rejection | `docker compose --profile tools build --pull && bash scripts/verify-compose-lifecycle.sh`; generate and scan artifacts outside Git |
+| Browser acceptance | Real production topology in Chromium, project-labelled cleanup, no retries, no mocks, no test-only routes | From the repository root, install once with `(cd web && npm ci && npm exec --offline -- playwright install --with-deps chromium)`, then run `sg docker -c "bash scripts/verify-browser.sh"` (the Docker group is needed locally) |
+| Release bundle acceptance | Two byte-identical source bundles from committed Git objects, canonical checksum, fail-closed verification and safe extraction, then policy, Compose lifecycle, and browser gates from the extracted artifact | After the same one-time Playwright Chromium install, run `sg docker -c "bash scripts/verify-release-bundle.sh"` from the repository root |
 
-The container gate expects BuildKit/Docker access and network access to resolve exact pinned dependencies and current vulnerability data. Runtime trace analysis and training tests remain deterministic and offline; no gate makes a live AI or network model call.
+The container and release-bundle gates expect BuildKit/Docker access and network access to resolve exact pinned dependencies. The release bundle itself is deterministic and contains only eligible committed source plus `RELEASE-MANIFEST.json`; `.hermes`, caches, build/test/browser outputs, local databases/bytecode, environment files, and private imports are excluded by both builder and verifier. Dependencies are restored from lock files during the extracted-artifact smoke. Runtime trace analysis and training tests remain deterministic and offline; no gate makes a live AI or network model call.
 
 ## Exact-snapshot review
 

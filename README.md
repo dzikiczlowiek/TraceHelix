@@ -103,6 +103,27 @@ The API and CLI share the same SQLite volume, while `imports/` is mounted read-o
 
 The deployment uses separate non-root API and nginx images on a Docker-internal bridge network. Only nginx publishes a host port, and that port is bound to host loopback. The API permits a wildcard listener only when both the explicit opt-in and a Docker/OCI runtime marker are present; the same flag fails closed during direct host execution. Nginx resolves the API through Docker DNS so API restart or recreation does not strand the public path. Run `docker compose --profile tools build --pull && bash scripts/verify-compose-lifecycle.sh` to exercise the pinned build, restart, and recreation recovery.
 
+## Browser acceptance
+
+The real-process browser acceptance verifier exercises the production Docker Compose topology (nginx -> API -> SQLite) in Chromium, seeding two committed synthetic JSONL traces through the real containerized CLI and asserting accessible role/label selectors with no retries, mocks, or test-only routes. Install dependencies and the browser once, then run the verifier from the repository root through the Docker group (Docker access is needed locally):
+
+```bash
+(cd web && npm ci && npm exec --offline -- playwright install --with-deps chromium)
+sg docker -c "bash scripts/verify-browser.sh"
+```
+
+`scripts/verify-browser.sh` brings up its own `tracehelix-browser-<pid>` project on an ephemeral loopback port and is fail-closed on teardown: a green Playwright run that leaves any project-labelled container, network, or volume residue is reported as a hard failure, and no foreign Docker project is ever matched. The same verifier runs in CI as the bounded `Browser acceptance` job (`timeout-minutes: 20`, exact pinned Actions, Node 24.18.0).
+
+## Deterministic release bundle
+
+The source-bundle gate builds the committed `HEAD` twice from Git objects, requires byte-identical `tracehelix-0.1.0-source.tar.gz` and `SHA256SUMS` outputs, verifies the archive fail-closed before safe extraction, and runs the repository policy, digest-pinned Compose lifecycle, and browser acceptance from the extracted artifact rather than the checkout. After installing Playwright Chromium as shown above, run from the repository root:
+
+```bash
+sg docker -c "bash scripts/verify-release-bundle.sh"
+```
+
+`scripts/build_release_bundle.py` writes only to an absolute output directory outside the worktree and packages eligible committed source while excluding `.hermes`, caches, build/test/browser outputs, local databases/bytecode, environment files, and private imports. `scripts/verify_release_bundle.py` independently enforces the same exclusions and validates the checksum, deterministic gzip/tar metadata, path/type/boundary rules, and every `RELEASE-MANIFEST.json` hash before extracting without `tar.extractall`. The bounded CI job is named `Release bundle acceptance` (`timeout-minutes: 35`). This is local install-from-artifact evidence; a public tag, GitHub Release, signed provenance, and downloaded-public-artifact verification remain release follow-ups.
+
 See [`docs/architecture.md`](docs/architecture.md) for trust boundaries and data flow, and [`docs/verification.md`](docs/verification.md) for the complete local/CI gate matrix and exact-snapshot review rules.
 
-Deferred intentionally: import upload, source-file/source viewer endpoints, arbitrary file access, sequence zoom/alignment, browser Playwright, ML/training, ONNX, and live AI.
+Deferred intentionally: import upload, source-file/source viewer endpoints, arbitrary file access, sequence zoom/alignment, ML/training, ONNX, and live AI.

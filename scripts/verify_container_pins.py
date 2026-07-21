@@ -37,17 +37,21 @@ EXPECTED_ACTIONS = [
     "actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d",
     "actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903",
     "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
     "astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244",
 ]
 EXPECTED_CI_LINES = Counter(
     {
         "os: [ubuntu-24.04, macos-15, windows-2025]": 1,
-        "runs-on: ubuntu-24.04": 4,
+        "runs-on: ubuntu-24.04": 6,
         "version: 0.11.29": 2,
         "python-version: '3.11.15'": 2,
         "syft-version: v1.42.3": 2,
         "version: v0.72.0": 2,
-        "node-version: 24.18.0": 1,
+        "node-version: 24.18.0": 3,
     }
 )
 SYNTAX = re.compile(r"^#\s*syntax=(?P<reference>\S+)\s*$", re.IGNORECASE)

@@ -12,6 +12,14 @@ cleanup() {
     docker rm --force "$BLOCKER" >/dev/null 2>&1 || true
   fi
   "${DC[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  local residue
+  residue=$(docker ps -a --quiet --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null || true)
+  residue="$residue$(docker network ls --quiet --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null || true)"
+  residue="$residue$(docker volume ls --quiet --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null || true)"
+  if [[ -n "${residue// /}" ]]; then
+    echo "verify-compose-lifecycle: teardown left Docker resources for project $PROJECT" >&2
+    exit 1
+  fi
 }
 trap cleanup EXIT INT TERM
 

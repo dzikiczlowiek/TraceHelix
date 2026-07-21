@@ -9,8 +9,10 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 import tomllib
 import unittest
 import xml.etree.ElementTree as ET
@@ -33,8 +35,17 @@ CHANGELOG_MD = ROOT / "CHANGELOG.md"
 CODEOWNERS = ROOT / ".github" / "CODEOWNERS"
 PR_TEMPLATE = ROOT / ".github" / "pull_request_template.md"
 RELEASE_READINESS = ROOT / "docs" / "release-readiness-v0.1.0.md"
+VERIFICATION_MD = ROOT / "docs" / "verification.md"
 README = ROOT / "README.md"
 ARCHITECTURE = ROOT / "docs" / "architecture.md"
+BROWSER_VERIFIER = ROOT / "scripts" / "verify-browser.sh"
+PLAYWRIGHT_CONFIG = ROOT / "web" / "playwright.config.ts"
+E2E_SPEC = ROOT / "web" / "e2e" / "release.spec.ts"
+BUNDLE_BUILDER = ROOT / "scripts" / "build_release_bundle.py"
+BUNDLE_BUILDER_TESTS = ROOT / "scripts" / "test_build_release_bundle.py"
+BUNDLE_VERIFIER = ROOT / "scripts" / "verify_release_bundle.py"
+BUNDLE_VERIFIER_TESTS = ROOT / "scripts" / "test_verify_release_bundle.py"
+BUNDLE_ACCEPTANCE = ROOT / "scripts" / "verify-release-bundle.sh"
 
 # Canonical SemVer 2.0.0 (optional but valid prerelease/build metadata). The
 # cross-source equality check, not this pattern alone, pins a release value.
@@ -253,16 +264,24 @@ class SourceFingerprintTests(unittest.TestCase):
 
 class RepositoryPrivacyTests(unittest.TestCase):
     def test_private_imports_are_ignored_but_placeholder_is_tracked(self) -> None:
-        ignored = subprocess.run(
-            ["git", "check-ignore", "--quiet", "--no-index", "imports/private-trace.jsonl"],
-            cwd=ROOT,
-            check=False,
-        )
-        placeholder = subprocess.run(
-            ["git", "check-ignore", "--quiet", "--no-index", "imports/.gitkeep"],
-            cwd=ROOT,
-            check=False,
-        )
+        # Run against a disposable repository so the guard also works from a
+        # verified source bundle, which intentionally contains no .git directory.
+        with tempfile.TemporaryDirectory(prefix="tracehelix-privacy-") as temp:
+            root = Path(temp)
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            shutil.copy2(ROOT / ".gitignore", root / ".gitignore")
+            (root / "imports").mkdir()
+            (root / "imports" / ".gitkeep").touch()
+            ignored = subprocess.run(
+                ["git", "check-ignore", "--quiet", "--no-index", "imports/private-trace.jsonl"],
+                cwd=root,
+                check=False,
+            )
+            placeholder = subprocess.run(
+                ["git", "check-ignore", "--quiet", "--no-index", "imports/.gitkeep"],
+                cwd=root,
+                check=False,
+            )
         self.assertEqual(0, ignored.returncode)
         self.assertNotEqual(0, placeholder.returncode)
 
@@ -401,6 +420,19 @@ class ContainerPinVerifierTests(unittest.TestCase):
                 result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), mutated)
                 self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_rejects_removal_of_the_browser_acceptance_job(self) -> None:
+        # Removing the dedicated browser job changes the ordered action
+        # allowlist and the runs-on/node-version line counts, so the pin
+        # verifier must fail closed.
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("  browser:\n", workflow)
+        start = workflow.index("  browser:\n")
+        end = workflow.index("  python:", start)
+        mutated = workflow[:start] + workflow[end:]
+        self.assertNotEqual(workflow, mutated)
+        result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), mutated)
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+
 
 class CriticalInvariantTests(unittest.TestCase):
     """Guard reviewed DNS configuration and lifecycle script bytes."""
@@ -412,7 +444,7 @@ class CriticalInvariantTests(unittest.TestCase):
     NEW_API_USES_NEW_IP = '[[ -n "$new_api_ip" && "$new_api_ip" != "$old_api_ip" ]]'
     # Intentional lifecycle edits require review and an explicit digest update.
     EXPECTED_LIFECYCLE_SHA256 = (
-        "7281d33200e9fd0e44c35e874fb1ca37e5cd94ca79a54bf33fa1489eaf3f1716"
+        "d0b9cb9518b53f375ced8dcf1239f39df61d49b60d3fdca456c882e07e5c6c5d"
     )
 
     @staticmethod
@@ -911,6 +943,318 @@ class GovernanceAndScopeTests(unittest.TestCase):
 
     def test_security_support_model_does_not_pin_a_transient_branch(self) -> None:
         self._assert_no_forbidden_phrase(SECURITY_MD, SECURITY_FORBIDDEN_PHRASES)
+
+
+class BrowserAcceptanceGuardTests(unittest.TestCase):
+    """Guard the real-process browser acceptance verifier and its wiring.
+
+    These guards fail closed if the browser acceptance CI job, verifier script,
+    or its documentation is removed or inerted. They complement the exact
+    ordered CI action allowlist enforced by ``scripts/verify_container_pins.py``
+    and the focused mutation test that removes the whole browser job.
+    """
+
+    REQUIRED_BROWSER_FILES = (BROWSER_VERIFIER, PLAYWRIGHT_CONFIG, E2E_SPEC)
+
+    # Stable anchors in the browser acceptance CI job.
+    CI_BROWSER_ANCHORS = (
+        "  browser:",
+        "name: Browser acceptance",
+        "bash scripts/verify-browser.sh",
+        "npm exec --offline -- playwright install --with-deps chromium",
+    )
+
+    # Stable behavioral anchors in the verifier script: a unique project label,
+    # project-labelled residue queries (no foreign-resource actioning), a hard
+    # teardown, and a hard-fail when success-path teardown leaves any residue.
+    SCRIPT_ANCHORS = (
+        'PROJECT="tracehelix-browser-$$"',
+        "label=com.docker.compose.project=$PROJECT",
+        "down --volumes --remove-orphans",
+        "[[ $hard -ne 0 ]]",
+    )
+
+    VERIFICATION_BROWSER_ANCHORS = (
+        "Browser acceptance",
+        "scripts/verify-browser.sh",
+        "(cd web && npm ci && npm exec --offline -- playwright install --with-deps chromium)",
+        'sg docker -c "bash scripts/verify-browser.sh"',
+    )
+
+    README_BROWSER_ANCHORS = (
+        "Browser acceptance",
+        "scripts/verify-browser.sh",
+        "(cd web && npm ci && npm exec --offline -- playwright install --with-deps chromium)",
+    )
+
+    def _require_anchors_with_mutation(
+        self, path: Path, anchors: tuple[str, ...]
+    ) -> None:
+        text = path.read_text(encoding="utf-8")
+        require_anchors(text, anchors, str(path))
+        for anchor in anchors:
+            with self.subTest(path=path.name, anchor=anchor):
+                tampered = text.replace(anchor, TAMPER_TOKEN)
+                self.assertNotEqual(text, tampered)
+                with self.assertRaises(AssertionError):
+                    require_anchors(tampered, anchors, str(path))
+
+    @staticmethod
+    def _require_ci_browser_job(workflow_text: str) -> None:
+        for needle in BrowserAcceptanceGuardTests.CI_BROWSER_ANCHORS:
+            if needle not in workflow_text:
+                raise AssertionError(
+                    f"ci.yml missing required browser acceptance anchor: {needle!r}"
+                )
+
+    def test_browser_acceptance_files_are_present(self) -> None:
+        missing = [str(p) for p in self.REQUIRED_BROWSER_FILES if not p.is_file()]
+        self.assertEqual([], missing, f"missing browser acceptance files: {missing}")
+
+    def test_ci_browser_job_is_wired_with_pinned_steps(self) -> None:
+        self._require_ci_browser_job(WORKFLOW.read_text(encoding="utf-8"))
+
+    def test_inerting_the_browser_verifier_step_fails(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("run: bash scripts/verify-browser.sh\n", workflow)
+        mutated = workflow.replace(
+            "run: bash scripts/verify-browser.sh\n",
+            "run: echo inerted\n",
+            1,
+        )
+        self.assertNotEqual(workflow, mutated)
+        with self.assertRaises(AssertionError):
+            self._require_ci_browser_job(mutated)
+
+    def test_verifier_script_preserves_hardening_anchors(self) -> None:
+        self._require_anchors_with_mutation(BROWSER_VERIFIER, self.SCRIPT_ANCHORS)
+
+    def test_verification_documents_canonical_browser_command(self) -> None:
+        self._require_anchors_with_mutation(
+            VERIFICATION_MD, self.VERIFICATION_BROWSER_ANCHORS
+        )
+
+    def test_readme_documents_browser_acceptance(self) -> None:
+        self._require_anchors_with_mutation(README, self.README_BROWSER_ANCHORS)
+
+
+class ReleaseBundleGuardTests(unittest.TestCase):
+    """Guard deterministic bundle creation, verification, and artifact smoke."""
+
+    REQUIRED_FILES = (
+        BUNDLE_BUILDER,
+        BUNDLE_BUILDER_TESTS,
+        BUNDLE_VERIFIER,
+        BUNDLE_VERIFIER_TESTS,
+        BUNDLE_ACCEPTANCE,
+    )
+    CI_ANCHORS = (
+        "  release-bundle:",
+        "name: Release bundle acceptance",
+        "timeout-minutes: 35",
+        "bash scripts/verify-release-bundle.sh",
+        "npm exec --offline -- playwright install --with-deps chromium",
+    )
+    CI_SETUP_ORDER = (
+        "name: Install locked web dependencies",
+        "run: npm ci",
+        "npm exec --offline -- playwright install --with-deps chromium",
+        "bash scripts/verify-release-bundle.sh",
+    )
+    SCRIPT_ANCHORS = (
+        "build_release_bundle.py",
+        'cmp "$OUT_A/$ARCHIVE" "$OUT_B/$ARCHIVE"',
+        "verify_release_bundle.py",
+        'SOURCE="$EXTRACT/tracehelix-$VERSION"',
+        "scripts/test_repository_guards.py",
+        "docker compose --profile tools build --pull",
+        "bash scripts/verify-compose-lifecycle.sh",
+        "bash scripts/verify-browser.sh",
+    )
+    BUILDER_EXCLUSION_ANCHORS = (
+        "_FORBIDDEN_RELEASE_COMPONENTS",
+        '".hermes"',
+        '"test-results"',
+        '"playwright-report"',
+        '".db"',
+        'folded_components[0] == "imports"',
+    )
+    VERIFIER_EXCLUSION_ANCHORS = (
+        "FORBIDDEN_RELEASE_COMPONENTS",
+        '".hermes"',
+        '"test-results"',
+        '"playwright-report"',
+        '".db"',
+        'components[0] == "imports"',
+        "forbidden release source path",
+    )
+    README_ANCHORS = (
+        "Deterministic release bundle",
+        'sg docker -c "bash scripts/verify-release-bundle.sh"',
+        "Release bundle acceptance",
+        "install-from-artifact evidence",
+    )
+    VERIFICATION_ANCHORS = (
+        "Release bundle acceptance",
+        'sg docker -c "bash scripts/verify-release-bundle.sh"',
+        "Two byte-identical source bundles",
+    )
+    READINESS_ANCHORS = (
+        "deterministic local source bundle",
+        "install-from-artifact evidence",
+        "no public tag",
+    )
+    CHANGELOG_LIMITATION_ANCHORS = (
+        "local install-from-artifact evidence",
+        "no published release bundle",
+        "downloaded-public-artifact verification",
+    )
+    ARCHITECTURE_BUNDLE_ANCHORS = (
+        "deterministic local source-bundle",
+        "install-from-artifact evidence",
+        "public release",
+        "downloaded-public-artifact verification",
+    )
+    COMPOSE_LIFECYCLE_TEARDOWN_ANCHORS = (
+        "com.docker.compose.project",
+        "teardown left Docker resources",
+    )
+
+    def _require_with_mutation(self, path: Path, anchors: tuple[str, ...]) -> None:
+        text = path.read_text(encoding="utf-8")
+        require_anchors(text, anchors, str(path))
+        for anchor in anchors:
+            with self.subTest(path=path.name, anchor=anchor):
+                tampered = text.replace(anchor, TAMPER_TOKEN)
+                self.assertNotEqual(text, tampered)
+                with self.assertRaises(AssertionError):
+                    require_anchors(tampered, anchors, str(path))
+
+    def test_bundle_files_are_present(self) -> None:
+        missing = [str(path) for path in self.REQUIRED_FILES if not path.is_file()]
+        self.assertEqual([], missing, f"missing release bundle files: {missing}")
+
+    def test_ci_release_bundle_job_is_required(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        require_anchors(workflow, self.CI_ANCHORS, str(WORKFLOW))
+        job = workflow.split("  release-bundle:", 1)[1].split("\n  python:", 1)[0]
+        require_anchors(job, self.CI_SETUP_ORDER, "release-bundle job")
+        offsets = [job.index(anchor) for anchor in self.CI_SETUP_ORDER]
+        self.assertEqual(sorted(offsets), offsets, "release-bundle setup is out of order")
+
+        for anchor in self.CI_ANCHORS:
+            with self.subTest(anchor=anchor):
+                tampered = workflow.replace(anchor, TAMPER_TOKEN)
+                self.assertNotEqual(workflow, tampered)
+                with self.assertRaises((AssertionError, ValueError)):
+                    require_anchors(tampered, self.CI_ANCHORS, str(WORKFLOW))
+        for anchor in self.CI_SETUP_ORDER:
+            with self.subTest(job_anchor=anchor):
+                tampered = job.replace(anchor, TAMPER_TOKEN)
+                self.assertNotEqual(job, tampered)
+                with self.assertRaises(AssertionError):
+                    require_anchors(tampered, self.CI_SETUP_ORDER, "release-bundle job")
+
+    def test_acceptance_script_preserves_extracted_artifact_contract(self) -> None:
+        self._require_with_mutation(BUNDLE_ACCEPTANCE, self.SCRIPT_ANCHORS)
+
+    def test_builder_and_verifier_preserve_release_exclusions(self) -> None:
+        self._require_with_mutation(BUNDLE_BUILDER, self.BUILDER_EXCLUSION_ANCHORS)
+        self._require_with_mutation(BUNDLE_VERIFIER, self.VERIFIER_EXCLUSION_ANCHORS)
+
+    def test_readme_documents_bundle_without_public_release_overclaim(self) -> None:
+        self._require_with_mutation(README, self.README_ANCHORS)
+
+    def test_verification_documents_canonical_bundle_command(self) -> None:
+        self._require_with_mutation(VERIFICATION_MD, self.VERIFICATION_ANCHORS)
+
+    def test_readiness_records_local_evidence_and_public_followup(self) -> None:
+        self._require_with_mutation(RELEASE_READINESS, self.READINESS_ANCHORS)
+
+    def test_changelog_distinguishes_local_evidence_from_public_release(self) -> None:
+        changelog = CHANGELOG_MD.read_text(encoding="utf-8")
+        limitations = changelog.split("### Known open limitations", 1)[1]
+        require_anchors(
+            limitations,
+            self.CHANGELOG_LIMITATION_ANCHORS,
+            "CHANGELOG known limitations",
+        )
+        for anchor in self.CHANGELOG_LIMITATION_ANCHORS:
+            with self.subTest(anchor=anchor):
+                tampered = limitations.replace(anchor, TAMPER_TOKEN)
+                self.assertNotEqual(limitations, tampered)
+                with self.assertRaises(AssertionError):
+                    require_anchors(
+                        tampered,
+                        self.CHANGELOG_LIMITATION_ANCHORS,
+                        "CHANGELOG known limitations",
+                    )
+
+    def test_architecture_distinguishes_local_evidence_from_public_release(self) -> None:
+        self._require_with_mutation(ARCHITECTURE, self.ARCHITECTURE_BUNDLE_ANCHORS)
+
+    def test_bundle_cleanup_preserves_term_status_after_rm_command_failure(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="tracehelix-cleanup-test-") as temp:
+            root = Path(temp)
+            fakebin = root / "fakebin"
+            tmpdir = root / "tmp"
+            fakebin.mkdir()
+            tmpdir.mkdir()
+            rm_state = root / "rm-failed-once"
+
+            fake_python = fakebin / "python3"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\nexec /bin/sleep 30\n", encoding="utf-8"
+            )
+            fake_docker = fakebin / "docker"
+            fake_docker.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            fake_rm = fakebin / "rm"
+            fake_rm.write_text(
+                "#!/usr/bin/env bash\n"
+                ": >\"$TRACEHELIX_RM_FAIL_STATE\"\n"
+                "exit 77\n",
+                encoding="utf-8",
+            )
+            for executable in (fake_python, fake_docker, fake_rm):
+                executable.chmod(0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{fakebin}:{env['PATH']}"
+            env["TMPDIR"] = str(tmpdir)
+            env["TRACEHELIX_RM_FAIL_STATE"] = str(rm_state)
+            process = subprocess.Popen(
+                ["bash", str(BUNDLE_ACCEPTANCE)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while not list(tmpdir.glob("tracehelix-release-bundle-*")):
+                    if process.poll() is not None:
+                        self.fail(f"bundle verifier exited before TERM: {process.returncode}")
+                    if time.monotonic() >= deadline:
+                        self.fail("bundle verifier did not create its private work directory")
+                    time.sleep(0.05)
+                os.killpg(process.pid, signal.SIGTERM)
+                stdout, stderr = process.communicate(timeout=10)
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=5)
+
+            self.assertTrue(rm_state.is_file(), "the injected rm failure did not run")
+            self.assertEqual(143, process.returncode, stderr)
+            self.assertEqual([], list(tmpdir.glob("tracehelix-release-bundle-*")))
+            self.assertEqual("", stdout)
+
+    def test_compose_lifecycle_teardown_is_fail_closed(self) -> None:
+        self._require_with_mutation(
+            COMPOSE_LIFECYCLE, self.COMPOSE_LIFECYCLE_TEARDOWN_ANCHORS
+        )
 
 
 if __name__ == "__main__":
