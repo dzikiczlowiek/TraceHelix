@@ -262,16 +262,24 @@ class SourceFingerprintTests(unittest.TestCase):
 
 class RepositoryPrivacyTests(unittest.TestCase):
     def test_private_imports_are_ignored_but_placeholder_is_tracked(self) -> None:
-        ignored = subprocess.run(
-            ["git", "check-ignore", "--quiet", "--no-index", "imports/private-trace.jsonl"],
-            cwd=ROOT,
-            check=False,
-        )
-        placeholder = subprocess.run(
-            ["git", "check-ignore", "--quiet", "--no-index", "imports/.gitkeep"],
-            cwd=ROOT,
-            check=False,
-        )
+        # Run against a disposable repository so the guard also works from a
+        # verified source bundle, which intentionally contains no .git directory.
+        with tempfile.TemporaryDirectory(prefix="tracehelix-privacy-") as temp:
+            root = Path(temp)
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            shutil.copy2(ROOT / ".gitignore", root / ".gitignore")
+            (root / "imports").mkdir()
+            (root / "imports" / ".gitkeep").touch()
+            ignored = subprocess.run(
+                ["git", "check-ignore", "--quiet", "--no-index", "imports/private-trace.jsonl"],
+                cwd=root,
+                check=False,
+            )
+            placeholder = subprocess.run(
+                ["git", "check-ignore", "--quiet", "--no-index", "imports/.gitkeep"],
+                cwd=root,
+                check=False,
+            )
         self.assertEqual(0, ignored.returncode)
         self.assertNotEqual(0, placeholder.returncode)
 
