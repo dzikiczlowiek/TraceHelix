@@ -160,6 +160,141 @@ def forbid_phrases(text: str, phrases: tuple[str, ...], source: str) -> None:
         raise AssertionError(f"{source} contains unstable phrases: {found}")
 
 
+def parse_release_create_assets(publish_slice: str) -> list[str]:
+    """Return the ordered asset arguments of the publish ``gh release create``.
+
+    Only the publish job slice is scanned and ``--`` option flags (with their
+    values) are excluded, so the result is exactly the uploaded release assets.
+    Dropping one asset from this command cannot hide behind the same name still
+    appearing in the assemble/download steps.
+    """
+    marker = 'gh release create "$TAG"'
+    if marker not in publish_slice:
+        raise AssertionError("publish job is missing gh release create")
+    body = publish_slice.split(marker, 1)[1].split("\n      - name:", 1)[0]
+    assets: list[str] = []
+    for raw in body.splitlines():
+        token = raw.strip()
+        if not token or token.startswith("--"):
+            continue
+        token = token.removesuffix("\\").strip().strip('"')
+        if token:
+            assets.append(token)
+    return assets
+
+
+def parse_provenance_subject_path(publish_slice: str) -> str:
+    """Return the ``subject-path`` of the publish attest-build-provenance step.
+
+    Scoped to the provenance step's ``with:`` block so swapping the subject for
+    a non-archive asset (whose path appears elsewhere in publish) is detected.
+    """
+    marker = "actions/attest-build-provenance@"
+    if marker not in publish_slice:
+        raise AssertionError("publish job is missing attest-build-provenance")
+    block = publish_slice.split(marker, 1)[1].split("\n      - name:", 1)[0]
+    for raw in block.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("subject-path:"):
+            return stripped.split("subject-path:", 1)[1].strip()
+    raise AssertionError("attest-build-provenance step has no subject-path")
+
+
+def parse_release_view_guard(publish_slice: str) -> tuple[str, list[str]]:
+    """Return ``(condition, body)`` of the publish ``gh release view`` guard.
+
+    The guard must be a non-negated ``if gh release view "$TAG" ...; then``
+    whose branch fails closed with ``exit 1``. Inverting the condition leaves
+    the anchor string in place but flips never-overwrite into never-create, so
+    callers assert both the exact condition and the in-branch ``exit 1``.
+    """
+    lines = publish_slice.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("if ") and 'gh release view "$TAG"' in stripped:
+            start = index
+            break
+    if start is None:
+        raise AssertionError("publish job is missing the gh release view guard")
+    condition = lines[start].strip()
+    body: list[str] = []
+    for line in lines[start + 1:]:
+        stripped = line.strip()
+        if stripped == "fi":
+            break
+        body.append(stripped)
+    else:
+        raise AssertionError("gh release view guard is missing its closing fi")
+    return condition, body
+
+
+def parse_assemble_expected_set(assemble_slice: str) -> list[str]:
+    """Return the literal artifact-name set asserted by the assemble job.
+
+    Only the ``expected=$(printf ...)`` literal in assemble-evidence is parsed.
+    Deleting a name there (while its download/upload steps still mention it)
+    cannot be hidden behind global anchor presence.
+    """
+    marker = "expected=$(printf"
+    if marker not in assemble_slice:
+        raise AssertionError("assemble-evidence is missing the expected-set literal")
+    body = assemble_slice.split(marker, 1)[1]
+    end = body.find(")")
+    if end == -1:
+        raise AssertionError("expected-set literal is missing its closing paren")
+    names: list[str] = []
+    for token in body[:end].split("|", 1)[0].split():
+        cleaned = token.removesuffix("\\").strip().strip('"')
+        if cleaned and not cleaned.startswith("'"):
+            names.append(cleaned)
+    return names
+
+
+def parse_copy_exclusive_flags(shell_text: str) -> str:
+    """Return the ``flags = ...`` line from ``copy_verified_file_exclusively``.
+
+    The exclusive-create flags must include ``os.O_EXCL``; the helper is named
+    from a second call site, so the check is scoped to the function body.
+    """
+    marker = "copy_verified_file_exclusively() {"
+    if marker not in shell_text:
+        raise AssertionError(
+            "verify-release-bundle.sh is missing copy_verified_file_exclusively"
+        )
+    body = shell_text.split(marker, 1)[1]
+    end = body.find("\n}\n")
+    if end == -1:
+        raise AssertionError("copy_verified_file_exclusively is missing its closing brace")
+    for raw in body[:end].splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("flags = "):
+            return stripped
+    raise AssertionError("copy_verified_file_exclusively is missing its flags assignment")
+
+
+def export_verified_output_body(shell_text: str) -> str:
+    """Return the active (non-comment) body of ``export_verified_output()``.
+
+    The destination-empty ``die`` message is shared with the earlier ``-d``
+    test, so the probe is scoped here and comments are stripped: deleting or
+    commenting out the ``find ... -mindepth 1`` guard fails closed even though
+    the message string still appears elsewhere in the function.
+    """
+    marker = "export_verified_output() {"
+    if marker not in shell_text:
+        raise AssertionError(
+            "verify-release-bundle.sh is missing export_verified_output"
+        )
+    body = shell_text.split(marker, 1)[1]
+    end = body.find("\n}\n")
+    if end == -1:
+        raise AssertionError("export_verified_output is missing its closing brace")
+    return "\n".join(
+        line for line in body[:end].splitlines() if not line.strip().startswith("#")
+    )
+
+
 class SourceFingerprintTests(unittest.TestCase):
     def fingerprint(
         self, script: Path, root: Path, extra_env: dict[str, str] | None = None
@@ -1240,6 +1375,14 @@ class ReleaseBundleGuardTests(unittest.TestCase):
         "RELEASE-MANIFEST.json",
         "rollback_verified_export",
     )
+    # Exclusive-create flags and the destination-empty probe are scoped to their
+    # shell functions in the assertions below: the copy helper name and the die
+    # message are each referenced from a second site, so exact-text checks here
+    # catch a hardening deletion that a global anchor scan would miss.
+    COPY_EXCLUSIVE_FLAGS = "flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL"
+    EXPORT_EMPTY_DIR_PROBE = (
+        '[[ -z "$(find "$destination" -mindepth 1 -maxdepth 1 -print -quit)" ]]'
+    )
 
     def _require_with_mutation(self, path: Path, anchors: tuple[str, ...]) -> None:
         text = path.read_text(encoding="utf-8")
@@ -1299,6 +1442,34 @@ class ReleaseBundleGuardTests(unittest.TestCase):
             copy_at,
             "rollback must know the destination name before an interruptible copy starts",
         )
+        # Exclusive-create (O_EXCL) and the destination-empty probe are scoped to
+        # their shell functions: the copy helper and die message are each
+        # referenced from a second site, so a global scan cannot tell that the
+        # hardening was deleted from the one function that enforces it.
+        self.assertEqual(self.COPY_EXCLUSIVE_FLAGS, parse_copy_exclusive_flags(script))
+        self.assertIn(
+            self.EXPORT_EMPTY_DIR_PROBE, export_verified_output_body(script)
+        )
+        tampered_excl = script.replace(
+            "os.O_WRONLY | os.O_CREAT | os.O_EXCL",
+            "os.O_WRONLY | os.O_CREAT",
+            1,
+        )
+        with self.assertRaises(AssertionError):
+            self.assertEqual(
+                self.COPY_EXCLUSIVE_FLAGS,
+                parse_copy_exclusive_flags(tampered_excl),
+            )
+        tampered_empty = script.replace(
+            self.EXPORT_EMPTY_DIR_PROBE,
+            '[[ -z "" ]]',
+            1,
+        )
+        with self.assertRaises(AssertionError):
+            self.assertIn(
+                self.EXPORT_EMPTY_DIR_PROBE,
+                export_verified_output_body(tampered_empty),
+            )
 
     def test_readme_documents_bundle_without_public_release_overclaim(self) -> None:
         self._require_with_mutation(README, self.README_ANCHORS)
@@ -1459,6 +1630,32 @@ class ReleaseWorkflowGuardTests(unittest.TestCase):
         "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
     )
     UNIFIED_ARTIFACT = "tracehelix-release-assets"
+    # Exact publish ``gh release create`` asset list and the assemble
+    # ``expected=$(printf ...)`` literal. Asserting these as ordered tuples,
+    # scoped to their job slices, catches a single dropped asset that a global
+    # anchor scan (the name still appears in download/upload steps) would miss.
+    PUBLISH_CREATE_ASSETS = (
+        "release/$ARCHIVE",
+        "release/SHA256SUMS",
+        "release/RELEASE-MANIFEST.json",
+        "release/RELEASE-NOTES.md",
+        "release/tracehelix-${VERSION}-source.cdx.json",
+        "release/tracehelix-api.spdx.json",
+        "release/tracehelix-web.spdx.json",
+    )
+    ASSEMBLE_EXPECTED_SET = (
+        "$ARCHIVE",
+        "SHA256SUMS",
+        "RELEASE-MANIFEST.json",
+        "RELEASE-NOTES.md",
+        "tracehelix-${VERSION}-source.cdx.json",
+        "tracehelix-api.spdx.json",
+        "tracehelix-web.spdx.json",
+    )
+    PROVENANCE_SUBJECT = (
+        "release/tracehelix-${{ needs.validate-tag.outputs.version }}-source.tar.gz"
+    )
+    RELEASE_VIEW_CONDITION = 'if gh release view "$TAG" >/dev/null 2>&1; then'
 
     def _require_with_mutation(
         self, path: Path, anchors: tuple[str, ...]
@@ -1475,6 +1672,33 @@ class ReleaseWorkflowGuardTests(unittest.TestCase):
     def _publish_slice(self, workflow: str) -> str:
         self.assertIn("  publish:\n", workflow)
         return workflow.split("  publish:\n", 1)[1]
+
+    def _assemble_slice(self, workflow: str) -> str:
+        self.assertIn("  assemble-evidence:\n", workflow)
+        return workflow.split("  assemble-evidence:\n", 1)[1].split(
+            "\n  publish:\n", 1
+        )[0]
+
+    @staticmethod
+    def _drop_publish_asset(workflow: str, asset: str) -> str:
+        """Return ``workflow`` with ``asset`` removed from the publish
+        ``gh release create`` argument list (faithful to mutation 1)."""
+        marker = 'gh release create "$TAG"'
+        head, rest = workflow.split(marker, 1)
+        boundary = rest.find("\n      - name:")
+        block_end = boundary if boundary != -1 else len(rest)
+        block, tail = rest[:block_end], rest[block_end:]
+        kept: list[str] = []
+        removed = False
+        for line in block.split("\n"):
+            token = line.strip().removesuffix("\\").strip().strip('"')
+            if token == asset and not removed:
+                removed = True
+                continue
+            kept.append(line)
+        if not removed:
+            raise AssertionError(f"publish asset not found for mutation: {asset}")
+        return head + marker + "\n".join(kept) + tail
 
     def test_release_workflow_file_is_present(self) -> None:
         self.assertTrue(
@@ -1554,6 +1778,21 @@ class ReleaseWorkflowGuardTests(unittest.TestCase):
 
     def test_publish_never_overwrites_an_existing_release(self) -> None:
         self._require_with_mutation(RELEASE_WORKFLOW, (self.NEVER_OVERWRITE,))
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        publish = self._publish_slice(workflow)
+        condition, body = parse_release_view_guard(publish)
+        self.assertEqual(self.RELEASE_VIEW_CONDITION, condition)
+        self.assertIn("exit 1", body)
+        # Inverting the condition flips never-overwrite into never-create while
+        # the anchor string ``gh release view "$TAG"`` stays in place.
+        tampered = workflow.replace(
+            self.RELEASE_VIEW_CONDITION,
+            'if ! gh release view "$TAG" >/dev/null 2>&1; then',
+            1,
+        )
+        with self.assertRaises(AssertionError):
+            inverted, _ = parse_release_view_guard(self._publish_slice(tampered))
+            self.assertEqual(self.RELEASE_VIEW_CONDITION, inverted)
 
     def test_publish_needs_all_and_only_required_gates_not_itself(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
@@ -1611,7 +1850,7 @@ class ReleaseWorkflowGuardTests(unittest.TestCase):
 
     def test_assemble_evidence_has_exact_handoff_and_publish_downloads_only_it(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
-        assemble = workflow.split("  assemble-evidence:\n", 1)[1].split("\n  publish:\n", 1)[0]
+        assemble = self._assemble_slice(workflow)
         for artifact in (
             "tracehelix-release-evidence",
             "tracehelix-0.1.0-source.cdx.json",
@@ -1625,6 +1864,23 @@ class ReleaseWorkflowGuardTests(unittest.TestCase):
         self.assertIn("sha256sum -c SHA256SUMS", assemble)
         self.assertIn("VERSION: ${{ needs.validate-tag.outputs.version }}", assemble)
         self.assertNotIn("< VERSION", assemble)
+        # The expected set must be the exact ``expected=$(printf ...)`` literal,
+        # not just globally present: deleting a name there (while its download
+        # step still mentions it) must fail closed.
+        self.assertEqual(
+            list(self.ASSEMBLE_EXPECTED_SET),
+            parse_assemble_expected_set(assemble),
+        )
+        tampered_set = workflow.replace(
+            "tracehelix-api.spdx.json tracehelix-web.spdx.json | LC_ALL=C sort",
+            "tracehelix-web.spdx.json | LC_ALL=C sort",
+            1,
+        )
+        with self.assertRaises(AssertionError):
+            self.assertEqual(
+                list(self.ASSEMBLE_EXPECTED_SET),
+                parse_assemble_expected_set(self._assemble_slice(tampered_set)),
+            )
         publish = self._publish_slice(workflow)
         self.assertEqual(1, publish.count("actions/download-artifact@"))
         self.assertNotIn("actions/checkout@", publish)
@@ -1674,6 +1930,25 @@ class ReleaseWorkflowGuardTests(unittest.TestCase):
         self._require_with_mutation(
             RELEASE_WORKFLOW, self.REQUIRED_ARTIFACT_NAMES
         )
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        publish = self._publish_slice(workflow)
+        # The required set must be the exact ``gh release create`` asset list,
+        # not just globally present: dropping one asset from the publish
+        # command (while its name still appears in assemble/download steps)
+        # must fail closed.
+        self.assertEqual(
+            list(self.PUBLISH_CREATE_ASSETS),
+            parse_release_create_assets(publish),
+        )
+        for asset in self.PUBLISH_CREATE_ASSETS:
+            with self.subTest(asset=asset):
+                tampered = self._drop_publish_asset(workflow, asset)
+                self.assertNotEqual(workflow, tampered)
+                with self.assertRaises(AssertionError):
+                    self.assertEqual(
+                        list(self.PUBLISH_CREATE_ASSETS),
+                        parse_release_create_assets(self._publish_slice(tampered)),
+                    )
 
     def test_release_workflow_creates_checksums_provenance_and_attestation(
         self,
@@ -1682,6 +1957,37 @@ class ReleaseWorkflowGuardTests(unittest.TestCase):
             RELEASE_WORKFLOW,
             ("sha256sum -c SHA256SUMS", self.PROVENANCE_ACTION),
         )
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        publish = self._publish_slice(workflow)
+        # Presence alone cannot hide a publish-only checksum removal (the
+        # string also lives in assemble) or a provenance subject swap (the
+        # replacement path appears elsewhere in publish), so both are asserted
+        # inside the publish slice.
+        self.assertEqual(
+            self.PROVENANCE_SUBJECT,
+            parse_provenance_subject_path(publish),
+        )
+        self.assertIn("sha256sum -c SHA256SUMS", publish)
+        tampered_subject = workflow.replace(
+            "subject-path: " + self.PROVENANCE_SUBJECT,
+            "subject-path: release/RELEASE-NOTES.md",
+            1,
+        )
+        with self.assertRaises(AssertionError):
+            self.assertEqual(
+                self.PROVENANCE_SUBJECT,
+                parse_provenance_subject_path(self._publish_slice(tampered_subject)),
+            )
+        tampered_checksum = workflow.replace(
+            "( cd release && sha256sum -c SHA256SUMS )",
+            "( cd release && true )",
+            1,
+        )
+        with self.assertRaises(AssertionError):
+            self.assertIn(
+                "sha256sum -c SHA256SUMS",
+                self._publish_slice(tampered_checksum),
+            )
 
 
 class ReleasePolicyGuardTests(unittest.TestCase):
