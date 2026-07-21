@@ -79,7 +79,9 @@ old_api_ip=$(docker inspect --format "{{(index .NetworkSettings.Networks \"${PRO
 [[ -n "$old_api_ip" ]]
 "${DC[@]}" rm --stop --force api >/dev/null
 BLOCKER="$PROJECT-old-api-ip"
-docker run --detach --name "$BLOCKER" --network "${PROJECT}_tracehelix-internal" --ip "$old_api_ip" --entrypoint /bin/sh tracehelix-web:local -c 'sleep 60' >/dev/null
+docker run --detach --name "$BLOCKER" --network "${PROJECT}_tracehelix-internal" --entrypoint /bin/sh tracehelix-web:local -c 'sleep 60' >/dev/null
+blocker_ip=$(docker inspect --format "{{(index .NetworkSettings.Networks \"${PROJECT}_tracehelix-internal\").IPAddress}}" "$BLOCKER")
+[[ "$blocker_ip" == "$old_api_ip" ]]
 "${DC[@]}" up --detach --no-deps api
 new_api_id=$("${DC[@]}" ps --quiet api)
 new_api_ip=$(docker inspect --format "{{(index .NetworkSettings.Networks \"${PROJECT}_tracehelix-internal\").IPAddress}}" "$new_api_id")

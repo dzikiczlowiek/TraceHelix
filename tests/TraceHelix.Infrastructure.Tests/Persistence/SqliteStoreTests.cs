@@ -210,7 +210,7 @@ public sealed class SqliteStoreTests
 
         Assert.True(await store.TrySaveAsync(run, TestContext.Current.CancellationToken));
 
-        await using var connection = new SqliteConnection($"Data Source={path};Mode=ReadOnly");
+        await using var connection = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT imported_at,data_json FROM runs WHERE id=$id";
