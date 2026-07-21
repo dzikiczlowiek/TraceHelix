@@ -13,13 +13,18 @@ cleanup() {
   local rc=$?
   trap - EXIT INT TERM
   if [[ -n "$WORK" ]]; then
-    rm -rf "$WORK"
+    if ! rm -rf -- "$WORK"; then
+      note "WARNING: rm cleanup failed; using independent fallback for owned work directory: $WORK"
+      if [[ ( -e "$WORK" || -L "$WORK" ) ]] && ! find "$WORK" -depth -delete; then
+        note "ERROR: could not remove owned work directory: $WORK"
+      fi
+    fi
   fi
   exit "$rc"
 }
 trap cleanup EXIT INT TERM
 
-for command in python3 git cmp sha256sum docker node npm; do
+for command in python3 git cmp sha256sum docker node npm find; do
   have "$command" || die "$command is required"
 done
 docker info >/dev/null 2>&1 || die "Docker daemon is unreachable (locally run through the docker group)"

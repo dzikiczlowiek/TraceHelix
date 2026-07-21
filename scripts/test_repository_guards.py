@@ -9,8 +9,10 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 import tomllib
 import unittest
 import xml.etree.ElementTree as ET
@@ -1107,6 +1109,12 @@ class ReleaseBundleGuardTests(unittest.TestCase):
         "no published release bundle",
         "downloaded-public-artifact verification",
     )
+    ARCHITECTURE_BUNDLE_ANCHORS = (
+        "deterministic local source-bundle",
+        "install-from-artifact evidence",
+        "public release",
+        "downloaded-public-artifact verification",
+    )
 
     def _require_with_mutation(self, path: Path, anchors: tuple[str, ...]) -> None:
         text = path.read_text(encoding="utf-8")
@@ -1177,6 +1185,67 @@ class ReleaseBundleGuardTests(unittest.TestCase):
                         self.CHANGELOG_LIMITATION_ANCHORS,
                         "CHANGELOG known limitations",
                     )
+
+    def test_architecture_distinguishes_local_evidence_from_public_release(self) -> None:
+        self._require_with_mutation(ARCHITECTURE, self.ARCHITECTURE_BUNDLE_ANCHORS)
+
+    def test_bundle_cleanup_preserves_term_status_after_rm_command_failure(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="tracehelix-cleanup-test-") as temp:
+            root = Path(temp)
+            fakebin = root / "fakebin"
+            tmpdir = root / "tmp"
+            fakebin.mkdir()
+            tmpdir.mkdir()
+            rm_state = root / "rm-failed-once"
+
+            fake_python = fakebin / "python3"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\nexec /bin/sleep 30\n", encoding="utf-8"
+            )
+            fake_docker = fakebin / "docker"
+            fake_docker.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            fake_rm = fakebin / "rm"
+            fake_rm.write_text(
+                "#!/usr/bin/env bash\n"
+                ": >\"$TRACEHELIX_RM_FAIL_STATE\"\n"
+                "exit 77\n",
+                encoding="utf-8",
+            )
+            for executable in (fake_python, fake_docker, fake_rm):
+                executable.chmod(0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{fakebin}:{env['PATH']}"
+            env["TMPDIR"] = str(tmpdir)
+            env["TRACEHELIX_RM_FAIL_STATE"] = str(rm_state)
+            process = subprocess.Popen(
+                ["bash", str(BUNDLE_ACCEPTANCE)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while not list(tmpdir.glob("tracehelix-release-bundle-*")):
+                    if process.poll() is not None:
+                        self.fail(f"bundle verifier exited before TERM: {process.returncode}")
+                    if time.monotonic() >= deadline:
+                        self.fail("bundle verifier did not create its private work directory")
+                    time.sleep(0.05)
+                os.killpg(process.pid, signal.SIGTERM)
+                stdout, stderr = process.communicate(timeout=10)
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=5)
+
+            self.assertTrue(rm_state.is_file(), "the injected rm failure did not run")
+            self.assertEqual(143, process.returncode, stderr)
+            self.assertEqual([], list(tmpdir.glob("tracehelix-release-bundle-*")))
+            self.assertEqual("", stdout)
 
 
 if __name__ == "__main__":
