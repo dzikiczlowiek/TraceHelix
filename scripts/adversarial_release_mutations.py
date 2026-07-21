@@ -77,7 +77,7 @@ def main() -> int:
         # nested unified content, and every altered downloaded asset (including
         # SHA256SUMS) rather than inspecting implementation text.
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "scripts/test_release_assets.py"],
+            [sys.executable, "scripts/test_release_assets.py"],
             cwd=ROOT,
             text=True,
             capture_output=True,
