@@ -15,6 +15,26 @@ public sealed class LoopbackUrlValidatorTests
     public void Allows_only_loopback(string? value, string expected) => Assert.Equal(expected, LoopbackUrlValidator.Validate(value));
 
     [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, true)]
+    public void Wildcard_policy_requires_both_explicit_opt_in_and_container_runtime(
+        bool requested, bool isContainerRuntime, bool expected) =>
+        Assert.Equal(expected, LoopbackUrlValidator.AllowWildcard(requested, isContainerRuntime));
+
+    [Theory]
+    [InlineData("http://0.0.0.0:5080")]
+    [InlineData("http://[::]:5080")]
+    public void Allows_wildcard_only_with_explicit_container_network_opt_in(string value) =>
+        Assert.Equal(value, LoopbackUrlValidator.Validate(value, allowWildcard: true));
+
+    [Fact]
+    public void Explicit_wildcard_opt_in_does_not_allow_arbitrary_interfaces() =>
+        Assert.Throws<InvalidOperationException>(() =>
+            LoopbackUrlValidator.Validate("http://192.168.1.10:5080", allowWildcard: true));
+
+    [Theory]
     [InlineData("http://0.0.0.0:5080")]
     [InlineData("http://[::]:5080")]
     [InlineData("http://192.168.1.2:5080")]

@@ -36,5 +36,8 @@
     "openapi-typescript": "7.10.1",
     "typescript-eslint": "latest",
     "vitest": "latest"
+  },
+  "overrides": {
+    "js-yaml": "4.3.0"
   }
 }

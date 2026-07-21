@@ -12,6 +12,7 @@ public sealed class ConcurrentImportTests
     {
         var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         var input = Path.Combine(dir, "input.jsonl");
         var database = Path.Combine(dir, "tracehelix.db");
         await File.WriteAllTextAsync(input, "{\"actor\":\"agent\",\"summary\":\"hello\"}\n", TestContext.Current.CancellationToken);

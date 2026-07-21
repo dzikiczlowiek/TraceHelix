@@ -18,6 +18,20 @@ namespace TraceHelix.Api.Tests;
 public sealed class ApiIntegrationTests
 {
     [Fact]
+    public async Task Production_accepts_only_loopback_host_headers()
+    {
+        await using var fixture = await ApiFixture.CreateAsync();
+
+        using var allowed = new HttpRequestMessage(HttpMethod.Get, "/health/live");
+        allowed.Headers.Host = "localhost";
+        Assert.Equal(HttpStatusCode.OK, (await fixture.Client.SendAsync(allowed)).StatusCode);
+
+        using var hostile = new HttpRequestMessage(HttpMethod.Get, "/health/live");
+        hostile.Headers.Host = "evil.example";
+        Assert.Equal(HttpStatusCode.BadRequest, (await fixture.Client.SendAsync(hostile)).StatusCode);
+    }
+
+    [Fact]
     public async Task Health_endpoints_are_live_and_ready()
     {
         await using var fixture = await ApiFixture.CreateAsync();
@@ -73,6 +87,49 @@ public sealed class ApiIntegrationTests
         var missing = await fixture.Client.GetAsync($"/api/v1/runs/{Guid.NewGuid()}");
         Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
         Assert.Empty(await missing.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task Development_allows_configured_vite_origin_to_reach_mutating_endpoint()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tracehelix-dev-origin-{Guid.NewGuid():N}");
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            builder.UseEnvironment("Development").UseSetting("TRACEHELIX_DB", Path.Combine(directory, "db.sqlite")));
+        using var client = factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/runs/{Guid.NewGuid()}/analysis/rules");
+        request.Headers.Add("Origin", "http://localhost:5173");
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Directory.Delete(directory, true);
+    }
+
+    [Fact]
+    public async Task Same_origin_can_mutate_analysis()
+    {
+        await using var fixture = await ApiFixture.CreateAsync();
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/runs/{fixture.LeftId}/analysis/rules");
+        request.Headers.Add("Origin", fixture.Client.BaseAddress!.GetLeftPart(UriPartial.Authority));
+
+        var response = await fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("https://evil.example")]
+    [InlineData("null")]
+    public async Task Foreign_or_opaque_origin_cannot_mutate_analysis(string origin)
+    {
+        await using var fixture = await ApiFixture.CreateAsync();
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/runs/{fixture.LeftId}/analysis/rules");
+        request.Headers.Add("Origin", origin);
+
+        var response = await fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await fixture.Client.GetAsync($"/api/v1/runs/{fixture.LeftId}/analysis/latest")).StatusCode);
     }
 
     [Fact]
@@ -153,6 +210,7 @@ internal sealed class ApiFixture : IAsyncDisposable
     {
         var directory = Path.Combine(Path.GetTempPath(), $"tracehelix-api-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         var database = Path.Combine(directory, "real.sqlite");
         var store = new SqliteStore(database);
         var adapter = new GenericJsonlAdapter();

@@ -23,6 +23,7 @@ public sealed class CliContractTests
     {
         var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         var input = Path.Combine(dir, "malformed.jsonl");
         var db = Path.Combine(dir, "tracehelix.db");
         await File.WriteAllTextAsync(input, string.Concat(Enumerable.Repeat("x\n", 100_001)), TestContext.Current.CancellationToken);
@@ -59,6 +60,8 @@ public sealed class CliContractTests
         var real = Path.Combine(dir, "real");
         var link = Path.Combine(dir, "link");
         Directory.CreateDirectory(real);
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(real, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         try { Directory.CreateSymbolicLink(link, real); }
         catch (Exception ex) when (ex is PlatformNotSupportedException or UnauthorizedAccessException or IOException)
         {
@@ -116,6 +119,7 @@ public sealed class CliContractTests
     {
         var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         return dir;
     }
 

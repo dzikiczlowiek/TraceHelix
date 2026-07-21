@@ -1,17 +1,20 @@
 # TraceHelix
 
-TraceHelix is a local, auditable analyzer for AI-agent execution traces. It imports generic JSONL into SQLite, applies deterministic step labels and evidence-linked detectors, compares runs, and exposes a loopback-only read-oriented v1 API and accessible React run browser. It makes no causal claims.
+TraceHelix is a local, auditable analyzer for AI-agent execution traces. It imports generic JSONL into SQLite, applies deterministic step labels and evidence-linked detectors, compares runs, and exposes a loopback-only v1 API and accessible React run browser. Analysis requests create append-only deterministic revisions; TraceHelix makes no causal claims.
 
 ## Prerequisites
 
-- .NET SDK 10 (pinned by `global.json`)
+- .NET SDK 10.0.302 exactly (enforced by `global.json`; install this SDK before running host commands)
 - Node.js/npm for the build-only React/Vite shell
 - Python 3.11+ and `uv` for the offline training-package shell
 
 ## Build and test
 
 ```bash
+python scripts/test_repository_guards.py
+python scripts/verify_container_pins.py
 dotnet restore TraceHelix.slnx --locked-mode
+uv sync --project training --locked
 dotnet format TraceHelix.slnx --verify-no-changes
 dotnet build TraceHelix.slnx -c Release --no-restore
 dotnet test TraceHelix.slnx -c Release --no-build
@@ -22,11 +25,12 @@ npm --prefix web run test -- --run
 npm --prefix web run build
 npm --prefix web audit --audit-level=high
 make verify-api
-uv sync --project training --locked
 uv run --project training ruff check training
 uv run --project training mypy training/src
 uv run --project training pytest -q training/tests
 ```
+
+For exact-snapshot reviews, run `python scripts/source_fingerprint.py` before and after the review and after staging. The v2 fingerprint covers `HEAD` plus the type, Unix mode, and exact content of every tracked or non-ignored untracked path in the prospective working tree; staging unchanged bytes preserves the value.
 
 ## CLI workflow
 
@@ -34,13 +38,16 @@ Build first, then run the real binary:
 
 ```bash
 CLI="dotnet src/TraceHelix.Cli/bin/Release/net10.0/TraceHelix.Cli.dll"
-$CLI import samples/generic-jsonl/minimal.jsonl --adapter generic-jsonl --db /tmp/tracehelix.db --json
-$CLI analyze <run-id> --db /tmp/tracehelix.db --classifier rules --json
-$CLI list --db /tmp/tracehelix.db --json
-$CLI show <run-id> --db /tmp/tracehelix.db --events --alerts --json
-$CLI compare <run-id> <run-id> --db /tmp/tracehelix.db --json
-$CLI report <run-id> --db /tmp/tracehelix.db --format json --out /tmp/report.json
-$CLI report <run-id> --db /tmp/tracehelix.db --format html --out /tmp/report.html
+TRACEHELIX_WORK=$(mktemp -d)
+chmod 700 "$TRACEHELIX_WORK"
+DB="$TRACEHELIX_WORK/tracehelix.db"
+$CLI import samples/generic-jsonl/minimal.jsonl --adapter generic-jsonl --db "$DB" --json
+$CLI analyze <run-id> --db "$DB" --classifier rules --json
+$CLI list --db "$DB" --json
+$CLI show <run-id> --db "$DB" --events --alerts --json
+$CLI compare <run-id> <run-id> --db "$DB" --json
+$CLI report <run-id> --db "$DB" --format json --out "$TRACEHELIX_WORK/report.json"
+$CLI report <run-id> --db "$DB" --format html --out "$TRACEHELIX_WORK/report.html"
 
 Report output is fail-closed: a report creates a new file and never overwrites any existing file or alias.
 ```
@@ -54,5 +61,33 @@ Generic JSONL imports default to limits of 256 MiB total input, 1 MiB per record
 Set `TRACEHELIX_DB` to a CLI-created database and run `dotnet run --project src/TraceHelix.Api`. The default listener is `http://127.0.0.1:5080`; the API provides health, run list/detail, sequence-paged events (maximum 200), latest analysis/alerts, rules analysis, and independent comparison under `/api/v1`. Development exposes the generated contract at `/openapi/v1.json`. Regenerate both committed artifacts from endpoint metadata with `cd web && npm run generate:api`; verify they were already current with `cd web && npm run check:api`. `web/src/api.ts` consumes the generated schema types in `web/src/api/generated.ts`.
 
 Run `npm --prefix web run dev`; Vite binds to loopback and proxies API requests. Deep links support `/runs/{id}` and `/compare?left={id}&right={id}`. The UI displays raw counts and denominators and does not assert causal proof.
+
+## Docker Compose
+
+Build and start the production API and static web UI:
+
+```bash
+docker compose up --build -d
+```
+
+Open <http://127.0.0.1:8080>. The host port is loopback-only by default. To choose another loopback port:
+
+```bash
+TRACEHELIX_PORT=8181 docker compose up --build -d
+```
+
+TraceHelix keeps SQLite state in the named `tracehelix-data` volume. To import a trace, place it in `imports/` and run the containerized CLI:
+
+```bash
+cp /path/to/trace.jsonl imports/trace.jsonl
+docker compose run --rm cli import /imports/trace.jsonl \
+  --adapter generic-jsonl --db /data/tracehelix.db --json
+```
+
+The API and CLI share the same SQLite volume, while `imports/` is mounted read-only. Inspect status and logs with `docker compose ps` and `docker compose logs --tail=100`. Stop containers without deleting data with `docker compose down`. Delete containers **and the persistent database volume** only when intended with `docker compose down --volumes`.
+
+The deployment uses separate non-root API and nginx images on a Docker-internal bridge network. Only nginx publishes a host port, and that port is bound to host loopback. The API permits a wildcard listener only when both the explicit opt-in and a Docker/OCI runtime marker are present; the same flag fails closed during direct host execution. Nginx resolves the API through Docker DNS so API restart or recreation does not strand the public path. Run `docker compose --profile tools build --pull && bash scripts/verify-compose-lifecycle.sh` to exercise the pinned build, restart, and recreation recovery.
+
+See [`docs/architecture.md`](docs/architecture.md) for trust boundaries and data flow, and [`docs/verification.md`](docs/verification.md) for the complete local/CI gate matrix and exact-snapshot review rules.
 
 Deferred intentionally: import upload, source-file/source viewer endpoints, arbitrary file access, sequence zoom/alignment, browser Playwright, ML/training, ONNX, and live AI.
