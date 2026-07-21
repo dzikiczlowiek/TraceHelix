@@ -16,19 +16,22 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 wait_ready() {
-  for _ in {1..60}; do
+  local timeout_seconds=${1:-30}
+  local deadline=$((SECONDS + timeout_seconds))
+  while ((SECONDS < deadline)); do
     if curl --silent --fail --max-time 1 "http://127.0.0.1:$PORT/health/ready" >/dev/null 2>&1; then
       return 0
     fi
     sleep .25
   done
   "${DC[@]}" ps >&2 || true
+  "${DC[@]}" logs --no-color --tail 100 api web >&2 || true
   return 1
 }
 
 export TRACEHELIX_PORT="$PORT"
 "${DC[@]}" up --detach --no-build
-wait_ready
+wait_ready 30
 
 api_id=$("${DC[@]}" ps --quiet api)
 web_id=$("${DC[@]}" ps --quiet web)
@@ -72,7 +75,7 @@ docker rm --force "$cli_id" >/dev/null
 "${DC[@]}" run --rm --no-deps --entrypoint sh cli -c 'test "$(stat -c %a /data/tracehelix.db)" = 600'
 
 "${DC[@]}" restart api
-wait_ready
+wait_ready 30
 
 old_api_id=$("${DC[@]}" ps --quiet api)
 old_api_ip=$(docker inspect --format "{{(index .NetworkSettings.Networks \"${PROJECT}_tracehelix-internal\").IPAddress}}" "$old_api_id")
@@ -86,7 +89,7 @@ blocker_ip=$(docker inspect --format "{{(index .NetworkSettings.Networks \"${PRO
 new_api_id=$("${DC[@]}" ps --quiet api)
 new_api_ip=$(docker inspect --format "{{(index .NetworkSettings.Networks \"${PROJECT}_tracehelix-internal\").IPAddress}}" "$new_api_id")
 [[ -n "$new_api_ip" && "$new_api_ip" != "$old_api_ip" ]]
-wait_ready
+wait_ready 30
 docker rm --force "$BLOCKER" >/dev/null
 BLOCKER=""
 

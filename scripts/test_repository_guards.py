@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -17,6 +18,8 @@ FINGERPRINT = ROOT / "scripts" / "source_fingerprint.py"
 PIN_VERIFIER = ROOT / "scripts" / "verify_container_pins.py"
 DOCKERFILE = ROOT / "Dockerfile"
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+NGINX_CONF = ROOT / "deploy" / "nginx.conf"
+COMPOSE_LIFECYCLE = ROOT / "scripts" / "verify-compose-lifecycle.sh"
 
 
 class SourceFingerprintTests(unittest.TestCase):
@@ -274,6 +277,280 @@ class ContainerPinVerifierTests(unittest.TestCase):
                 mutated = workflow.replace(marker, malicious_step + "\n" + marker, 1)
                 result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), mutated)
                 self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+
+
+class CriticalInvariantTests(unittest.TestCase):
+    """Guard reviewed DNS configuration and lifecycle script bytes."""
+
+    RESOLVER = "resolver 127.0.0.11 valid=5s ipv6=off;"
+    ZONE = "zone tracehelix_api 64k;"
+    RESOLVABLE_SERVER = "server api:5080 resolve;"
+    BLOCKER_REUSES_OLD_IP = '[[ "$blocker_ip" == "$old_api_ip" ]]'
+    NEW_API_USES_NEW_IP = '[[ -n "$new_api_ip" && "$new_api_ip" != "$old_api_ip" ]]'
+    # Intentional lifecycle edits require review and an explicit digest update.
+    EXPECTED_LIFECYCLE_SHA256 = (
+        "7281d33200e9fd0e44c35e874fb1ca37e5cd94ca79a54bf33fa1489eaf3f1716"
+    )
+
+    @staticmethod
+    def _quote_masked_chars(line: str) -> list[tuple[str, bool]]:
+        """Classify each character against nginx-style quoting.
+
+        Returns ``(character, masked)`` pairs where ``masked`` marks
+        characters inside a single/double-quoted string or following a
+        backslash escape (outside single quotes). The comment and brace
+        scanners share this one view so meta-characters hidden by quoting
+        are handled consistently instead of by two drifting state machines.
+        """
+        masked_chars: list[tuple[str, bool]] = []
+        quote: str | None = None
+        escaped = False
+        for character in line:
+            if escaped:
+                masked_chars.append((character, True))
+                escaped = False
+                continue
+            if character == "\\" and quote != "'":
+                escaped = True
+                masked_chars.append((character, quote is not None))
+                continue
+            if character in ("'", '"'):
+                masked = quote is not None
+                if quote == character:
+                    quote = None
+                elif quote is None:
+                    quote = character
+                masked_chars.append((character, masked))
+                continue
+            masked_chars.append((character, quote is not None))
+        return masked_chars
+
+    @classmethod
+    def _strip_unquoted_comment(cls, line: str) -> str:
+        result = []
+        for character, masked in cls._quote_masked_chars(line):
+            if character == "#" and not masked:
+                break
+            result.append(character)
+        return "".join(result).strip()
+
+    @classmethod
+    def _active_lines(cls, text: str) -> list[str]:
+        return [
+            active
+            for raw_line in text.splitlines()
+            if (active := cls._strip_unquoted_comment(raw_line))
+        ]
+
+    @classmethod
+    def _brace_delta(cls, line: str) -> int:
+        delta = 0
+        for character, masked in cls._quote_masked_chars(line):
+            if not masked:
+                delta += (character == "{") - (character == "}")
+        return delta
+
+    def _top_level_lines(self, nginx_lines: list[str]) -> list[str]:
+        """Return active nginx lines that sit at http/top-level (depth zero) scope.
+
+        The ``resolver`` directive only drives runtime DNS resolution when it
+        lives at the http/top level; a copy nested inside a ``server`` or
+        ``location`` block is silently inert, so a line-anywhere scan would
+        rubber-stamp a weakened config. Walking brace depth with the shared
+        quote-aware scanner means a directive hidden inside a block cannot
+        satisfy this guard, and a file whose active braces no longer balance
+        (for example a truncated commit) fails closed rather than best-effort
+        matching directives against a half-parsed tree.
+        """
+        top_level: list[str] = []
+        depth = 0
+        for line in nginx_lines:
+            if depth == 0:
+                top_level.append(line)
+            depth += self._brace_delta(line)
+        if depth != 0:
+            self.fail(
+                "Unbalanced braces in deploy/nginx.conf active lines "
+                f"(ended at depth {depth}); refusing to validate an unclosed scope"
+            )
+        return top_level
+
+    def _upstream_lines(self, nginx_lines: list[str]) -> list[str]:
+        opening = "upstream tracehelix_api {"
+        try:
+            start = nginx_lines.index(opening)
+        except ValueError:
+            self.fail(f"Missing active nginx block: {opening!r}")
+
+        depth = 0
+        block = []
+        for index in range(start, len(nginx_lines)):
+            line = nginx_lines[index]
+            depth += self._brace_delta(line)
+            if index != start and depth > 0:
+                block.append(line)
+            if index != start and depth == 0:
+                return block
+        self.fail(f"Unclosed active nginx block: {opening!r}")
+
+    def _assert_nginx_invariants(self, nginx_text: str) -> None:
+        nginx_lines = self._active_lines(nginx_text)
+        top_level_lines = self._top_level_lines(nginx_lines)
+        upstream_lines = self._upstream_lines(nginx_lines)
+
+        checks = (
+            (
+                top_level_lines,
+                self.RESOLVER,
+                "active Docker DNS resolver at http/top-level scope",
+            ),
+            (
+                upstream_lines,
+                self.ZONE,
+                "shared zone inside the tracehelix_api upstream",
+            ),
+            (
+                upstream_lines,
+                self.RESOLVABLE_SERVER,
+                "runtime-resolved API server inside the tracehelix_api upstream",
+            ),
+        )
+        for haystack, needle, label in checks:
+            self.assertIn(needle, haystack, f"Missing {label}: {needle!r}")
+
+    def _assert_lifecycle_digest(self, lifecycle_bytes: bytes) -> None:
+        actual = hashlib.sha256(lifecycle_bytes).hexdigest()
+        self.assertEqual(
+            self.EXPECTED_LIFECYCLE_SHA256,
+            actual,
+            "Lifecycle script bytes changed; review the complete script and update "
+            "EXPECTED_LIFECYCLE_SHA256 intentionally",
+        )
+
+    def _comment_out(self, text: str, needle: str) -> str:
+        lines = text.splitlines(keepends=True)
+        for index, line in enumerate(lines):
+            if line.strip() == needle:
+                indentation = line[: len(line) - len(line.lstrip())]
+                newline = "\n" if line.endswith("\n") else ""
+                lines[index] = f"{indentation}# {needle}{newline}"
+                return "".join(lines)
+        self.fail(f"Cannot mutate missing active line: {needle!r}")
+
+    def test_reviewed_critical_invariants_are_unchanged(self) -> None:
+        self._assert_nginx_invariants(NGINX_CONF.read_text(encoding="utf-8"))
+        self._assert_lifecycle_digest(COMPOSE_LIFECYCLE.read_bytes())
+
+    def test_commented_nginx_invariants_are_rejected(self) -> None:
+        nginx_text = NGINX_CONF.read_text(encoding="utf-8")
+        for needle in (self.RESOLVER, self.ZONE, self.RESOLVABLE_SERVER):
+            with self.subTest(needle=needle):
+                mutated = self._comment_out(nginx_text, needle)
+                with self.assertRaises(AssertionError):
+                    self._assert_nginx_invariants(mutated)
+
+    def test_lifecycle_digest_rejects_semantic_weakening(self) -> None:
+        lifecycle_text = COMPOSE_LIFECYCLE.read_text(encoding="utf-8")
+        blocker = self.BLOCKER_REUSES_OLD_IP
+        new_api = self.NEW_API_USES_NEW_IP
+        mutations = {
+            "comment-blocker-assertion": self._comment_out(lifecycle_text, blocker),
+            "comment-new-api-assertion": self._comment_out(lifecycle_text, new_api),
+            "quoted-heredoc": lifecycle_text.replace(
+                blocker,
+                ": <<'INERT_GUARD_TEXT'\n"
+                f"{blocker}\n"
+                "INERT_GUARD_TEXT",
+                1,
+            ),
+            "backslash-heredoc": lifecycle_text.replace(
+                blocker,
+                ": <<\\INERT_GUARD_TEXT\n"
+                f"{blocker}\n"
+                "INERT_GUARD_TEXT",
+                1,
+            ),
+            "hyphenated-heredoc": lifecycle_text.replace(
+                new_api,
+                ": <<'INERT-GUARD-TEXT'\n"
+                f"{new_api}\n"
+                "INERT-GUARD-TEXT",
+                1,
+            ),
+            "tab-stripping-heredoc": lifecycle_text.replace(
+                new_api,
+                ": <<-'INERT_GUARD_TEXT'\n"
+                f"\t{new_api}\n"
+                "\tINERT_GUARD_TEXT",
+                1,
+            ),
+            "unreachable-blocker-assertion": lifecycle_text.replace(
+                blocker,
+                f"if false; then\n  {blocker}\nfi",
+                1,
+            ),
+            "unreachable-new-api-assertion": lifecycle_text.replace(
+                new_api,
+                f"if false; then\n  {new_api}\nfi",
+                1,
+            ),
+        }
+
+        for label, mutated in mutations.items():
+            with self.subTest(label=label):
+                self.assertNotEqual(lifecycle_text, mutated)
+                syntax = subprocess.run(
+                    ["bash", "-n"], input=mutated, text=True, capture_output=True
+                )
+                self.assertEqual(0, syntax.returncode, syntax.stderr)
+                with self.assertRaises(AssertionError):
+                    self._assert_lifecycle_digest(mutated.encode("utf-8"))
+
+    def test_quoted_comment_and_braces_do_not_deceive_nginx_parser(self) -> None:
+        quoted_line = 'guard "# not-comment }"; # real comment'
+        self.assertEqual(
+            'guard "# not-comment }";', self._strip_unquoted_comment(quoted_line)
+        )
+        self.assertEqual(0, self._brace_delta(self._strip_unquoted_comment(quoted_line)))
+
+        nginx_text = NGINX_CONF.read_text(encoding="utf-8")
+        for needle in (self.ZONE, self.RESOLVABLE_SERVER):
+            with self.subTest(needle=needle):
+                moved = nginx_text.replace(f"    {needle}\n", "", 1)
+                moved = moved.replace(
+                    "upstream tracehelix_api {\n",
+                    'upstream tracehelix_api {\n    guard "{";\n',
+                    1,
+                )
+                moved += f"\n{needle}\n"
+                with self.assertRaises(AssertionError):
+                    self._assert_nginx_invariants(moved)
+
+    def test_resolver_nested_in_a_server_block_is_rejected(self) -> None:
+        nginx_text = NGINX_CONF.read_text(encoding="utf-8")
+        # The exact directive bytes stay active in the file, but only inside a
+        # nested server block where nginx leaves resolver inert for runtime
+        # resolution. A line-anywhere scan would miss this weakening, so the
+        # depth-zero scope check must be what rejects it.
+        self.assertIn(self.RESOLVER + "\n", nginx_text)
+        moved = nginx_text.replace(
+            self.RESOLVER + "\n",
+            "server {\n    " + self.RESOLVER + "\n}\n",
+            1,
+        )
+        self.assertIn(self.RESOLVER, self._active_lines(moved))
+        with self.assertRaises(AssertionError):
+            self._assert_nginx_invariants(moved)
+
+    def test_unbalanced_nginx_braces_fail_closed(self) -> None:
+        nginx_text = NGINX_CONF.read_text(encoding="utf-8")
+        # Drop the final closing brace so active braces no longer balance. The
+        # guard must refuse to bless a truncated or unclosed scope instead of
+        # best-effort matching directives against a half-parsed tree.
+        mutated = nginx_text.rstrip()[:-1] + "\n"
+        self.assertNotEqual(nginx_text, mutated)
+        with self.assertRaises(AssertionError):
+            self._assert_nginx_invariants(mutated)
 
 
 if __name__ == "__main__":
