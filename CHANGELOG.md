@@ -19,6 +19,25 @@ exact equality by `scripts/test_repository_guards.py`.
   and `.github/pull_request_template.md`.
 - Repository guards for version agreement, required governance/release file
   presence, and stable release-scope anchors (with mutation tests).
+- Real-process browser acceptance through the production Docker Compose topology
+  (nginx -> API -> SQLite) in Chromium: `scripts/verify-browser.sh` plus the
+  `web/e2e/release.spec.ts` Playwright suite, with accessible role/label
+  selectors, no retries, no mocks, no test-only routes, and project-labelled
+  fail-closed teardown.
+- Dedicated bounded `Browser acceptance` CI job (ubuntu-24.04, exact pinned
+  Actions, Node 24.18.0) that installs `@playwright/test` 1.61.1, the Chromium
+  browser with OS dependencies, and runs the verifier.
+- Repository guards for the browser acceptance job, verifier, and documentation
+  with focused mutation tests, and exact CI Action/line-count pins for the new
+  job.
+- Canonical local browser-acceptance command in `README.md` and
+  `docs/verification.md`.
+
+### Changed
+- `docs/release-readiness-v0.1.0.md` P1-11 moved to `partially closed`: the
+  source-built container topology is now exercised in a real browser. The
+  deterministic release bundle, tag, release workflow, and install-from-artifact
+  evidence remain absent.
 
 ## [0.1.0]
 
@@ -41,5 +60,7 @@ source release and is not a release announcement.
   analysis revisions; and default reports that still serialize raw trace content
   under ambient file permissions.
 - Not a network, multi-user, or SaaS service; do not reverse-proxy or expose it.
-- No upload, arbitrary file browsing, live AI/ML, ONNX inference, or browser
-  Playwright coverage.
+- No upload, arbitrary file browsing, live AI/ML, or ONNX inference. Browser
+  acceptance now exercises the source-built compose topology, but there is no
+  published release bundle, tag, release workflow, or install-from-artifact
+  evidence.

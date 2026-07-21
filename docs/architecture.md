@@ -47,6 +47,6 @@ Dockerfile syntax, `FROM` dependencies, external `COPY --from`/`RUN --mount` sta
 
 All trace data stays local. Databases, raw/private traces, generated reports, model artifacts, dependency trees, and build/cache output are ignored by Git. Reports and comparisons describe observed evidence and explicitly avoid causal claims.
 
-Deferred capabilities include browser upload, arbitrary source-file browsing, sequence zoom/alignment, browser-level Playwright coverage, learned classifiers, ONNX inference, and live AI integration.
+Deferred capabilities include browser upload, arbitrary source-file browsing, sequence zoom/alignment, learned classifiers, ONNX inference, and live AI integration. The source-built production topology has bounded Chromium acceptance coverage through `scripts/verify-browser.sh`; deterministic release-bundle and install-from-artifact evidence remain pending.
 
 The bounded `v0.1.0` release scope and the twelve historical readiness findings are mapped in [`docs/release-readiness-v0.1.0.md`](docs/release-readiness-v0.1.0.md).

@@ -154,6 +154,28 @@ jobs:
       - name: Audit production and development dependencies
         run: npm audit --audit-level=high
 
+  browser:
+    name: Browser acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Node.js 24
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 24.18.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install locked web dependencies
+        run: npm ci
+        working-directory: web
+      - name: Install Playwright Chromium and OS dependencies
+        run: npm exec -- playwright install --with-deps chromium
+        working-directory: web
+      - name: Verify browser acceptance through the real production topology
+        run: bash scripts/verify-browser.sh
+
   python:
     name: Python
     runs-on: ubuntu-24.04

@@ -33,8 +33,12 @@ CHANGELOG_MD = ROOT / "CHANGELOG.md"
 CODEOWNERS = ROOT / ".github" / "CODEOWNERS"
 PR_TEMPLATE = ROOT / ".github" / "pull_request_template.md"
 RELEASE_READINESS = ROOT / "docs" / "release-readiness-v0.1.0.md"
+VERIFICATION_MD = ROOT / "docs" / "verification.md"
 README = ROOT / "README.md"
 ARCHITECTURE = ROOT / "docs" / "architecture.md"
+BROWSER_VERIFIER = ROOT / "scripts" / "verify-browser.sh"
+PLAYWRIGHT_CONFIG = ROOT / "web" / "playwright.config.ts"
+E2E_SPEC = ROOT / "web" / "e2e" / "release.spec.ts"
 
 # Canonical SemVer 2.0.0 (optional but valid prerelease/build metadata). The
 # cross-source equality check, not this pattern alone, pins a release value.
@@ -400,6 +404,19 @@ class ContainerPinVerifierTests(unittest.TestCase):
                 mutated = workflow.replace(marker, malicious_step + "\n" + marker, 1)
                 result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), mutated)
                 self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_rejects_removal_of_the_browser_acceptance_job(self) -> None:
+        # Removing the dedicated browser job changes the ordered action
+        # allowlist and the runs-on/node-version line counts, so the pin
+        # verifier must fail closed.
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("  browser:\n", workflow)
+        start = workflow.index("  browser:\n")
+        end = workflow.index("  python:", start)
+        mutated = workflow[:start] + workflow[end:]
+        self.assertNotEqual(workflow, mutated)
+        result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), mutated)
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
 
 
 class CriticalInvariantTests(unittest.TestCase):
@@ -911,6 +928,99 @@ class GovernanceAndScopeTests(unittest.TestCase):
 
     def test_security_support_model_does_not_pin_a_transient_branch(self) -> None:
         self._assert_no_forbidden_phrase(SECURITY_MD, SECURITY_FORBIDDEN_PHRASES)
+
+
+class BrowserAcceptanceGuardTests(unittest.TestCase):
+    """Guard the real-process browser acceptance verifier and its wiring.
+
+    These guards fail closed if the browser acceptance CI job, verifier script,
+    or its documentation is removed or inerted. They complement the exact
+    ordered CI action allowlist enforced by ``scripts/verify_container_pins.py``
+    and the focused mutation test that removes the whole browser job.
+    """
+
+    REQUIRED_BROWSER_FILES = (BROWSER_VERIFIER, PLAYWRIGHT_CONFIG, E2E_SPEC)
+
+    # Stable anchors in the browser acceptance CI job.
+    CI_BROWSER_ANCHORS = (
+        "  browser:",
+        "name: Browser acceptance",
+        "bash scripts/verify-browser.sh",
+        "npm exec -- playwright install --with-deps chromium",
+    )
+
+    # Stable behavioral anchors in the verifier script: a unique project label,
+    # project-labelled residue queries (no foreign-resource actioning), a hard
+    # teardown, and a hard-fail when success-path teardown leaves any residue.
+    SCRIPT_ANCHORS = (
+        'PROJECT="tracehelix-browser-$$"',
+        "label=com.docker.compose.project=$PROJECT",
+        "down --volumes --remove-orphans",
+        "[[ $hard -ne 0 ]]",
+    )
+
+    VERIFICATION_BROWSER_ANCHORS = (
+        "Browser acceptance",
+        "scripts/verify-browser.sh",
+        "(cd web && npm ci && npm exec -- playwright install --with-deps chromium)",
+        'sg docker -c "bash scripts/verify-browser.sh"',
+    )
+
+    README_BROWSER_ANCHORS = (
+        "Browser acceptance",
+        "scripts/verify-browser.sh",
+        "(cd web && npm ci && npm exec -- playwright install --with-deps chromium)",
+    )
+
+    def _require_anchors_with_mutation(
+        self, path: Path, anchors: tuple[str, ...]
+    ) -> None:
+        text = path.read_text(encoding="utf-8")
+        require_anchors(text, anchors, str(path))
+        for anchor in anchors:
+            with self.subTest(path=path.name, anchor=anchor):
+                tampered = text.replace(anchor, TAMPER_TOKEN)
+                self.assertNotEqual(text, tampered)
+                with self.assertRaises(AssertionError):
+                    require_anchors(tampered, anchors, str(path))
+
+    @staticmethod
+    def _require_ci_browser_job(workflow_text: str) -> None:
+        for needle in BrowserAcceptanceGuardTests.CI_BROWSER_ANCHORS:
+            if needle not in workflow_text:
+                raise AssertionError(
+                    f"ci.yml missing required browser acceptance anchor: {needle!r}"
+                )
+
+    def test_browser_acceptance_files_are_present(self) -> None:
+        missing = [str(p) for p in self.REQUIRED_BROWSER_FILES if not p.is_file()]
+        self.assertEqual([], missing, f"missing browser acceptance files: {missing}")
+
+    def test_ci_browser_job_is_wired_with_pinned_steps(self) -> None:
+        self._require_ci_browser_job(WORKFLOW.read_text(encoding="utf-8"))
+
+    def test_inerting_the_browser_verifier_step_fails(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("run: bash scripts/verify-browser.sh\n", workflow)
+        mutated = workflow.replace(
+            "run: bash scripts/verify-browser.sh\n",
+            "run: echo inerted\n",
+            1,
+        )
+        self.assertNotEqual(workflow, mutated)
+        with self.assertRaises(AssertionError):
+            self._require_ci_browser_job(mutated)
+
+    def test_verifier_script_preserves_hardening_anchors(self) -> None:
+        self._require_anchors_with_mutation(BROWSER_VERIFIER, self.SCRIPT_ANCHORS)
+
+    def test_verification_documents_canonical_browser_command(self) -> None:
+        self._require_anchors_with_mutation(
+            VERIFICATION_MD, self.VERIFICATION_BROWSER_ANCHORS
+        )
+
+    def test_readme_documents_browser_acceptance(self) -> None:
+        self._require_anchors_with_mutation(README, self.README_BROWSER_ANCHORS)
 
 
 if __name__ == "__main__":
