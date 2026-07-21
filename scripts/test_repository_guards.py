@@ -959,7 +959,7 @@ class BrowserAcceptanceGuardTests(unittest.TestCase):
         "  browser:",
         "name: Browser acceptance",
         "bash scripts/verify-browser.sh",
-        "npm exec -- playwright install --with-deps chromium",
+        "npm exec --offline -- playwright install --with-deps chromium",
     )
 
     # Stable behavioral anchors in the verifier script: a unique project label,
@@ -975,14 +975,14 @@ class BrowserAcceptanceGuardTests(unittest.TestCase):
     VERIFICATION_BROWSER_ANCHORS = (
         "Browser acceptance",
         "scripts/verify-browser.sh",
-        "(cd web && npm ci && npm exec -- playwright install --with-deps chromium)",
+        "(cd web && npm ci && npm exec --offline -- playwright install --with-deps chromium)",
         'sg docker -c "bash scripts/verify-browser.sh"',
     )
 
     README_BROWSER_ANCHORS = (
         "Browser acceptance",
         "scripts/verify-browser.sh",
-        "(cd web && npm ci && npm exec -- playwright install --with-deps chromium)",
+        "(cd web && npm ci && npm exec --offline -- playwright install --with-deps chromium)",
     )
 
     def _require_anchors_with_mutation(
@@ -1051,7 +1051,13 @@ class ReleaseBundleGuardTests(unittest.TestCase):
         "name: Release bundle acceptance",
         "timeout-minutes: 35",
         "bash scripts/verify-release-bundle.sh",
-        "npm exec -- playwright install --with-deps chromium",
+        "npm exec --offline -- playwright install --with-deps chromium",
+    )
+    CI_SETUP_ORDER = (
+        "name: Install locked web dependencies",
+        "run: npm ci",
+        "npm exec --offline -- playwright install --with-deps chromium",
+        "bash scripts/verify-release-bundle.sh",
     )
     SCRIPT_ANCHORS = (
         "build_release_bundle.py",
@@ -1096,6 +1102,11 @@ class ReleaseBundleGuardTests(unittest.TestCase):
         "install-from-artifact evidence",
         "no public tag",
     )
+    CHANGELOG_LIMITATION_ANCHORS = (
+        "local install-from-artifact evidence",
+        "no published release bundle",
+        "downloaded-public-artifact verification",
+    )
 
     def _require_with_mutation(self, path: Path, anchors: tuple[str, ...]) -> None:
         text = path.read_text(encoding="utf-8")
@@ -1112,7 +1123,25 @@ class ReleaseBundleGuardTests(unittest.TestCase):
         self.assertEqual([], missing, f"missing release bundle files: {missing}")
 
     def test_ci_release_bundle_job_is_required(self) -> None:
-        self._require_with_mutation(WORKFLOW, self.CI_ANCHORS)
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        require_anchors(workflow, self.CI_ANCHORS, str(WORKFLOW))
+        job = workflow.split("  release-bundle:", 1)[1].split("\n  python:", 1)[0]
+        require_anchors(job, self.CI_SETUP_ORDER, "release-bundle job")
+        offsets = [job.index(anchor) for anchor in self.CI_SETUP_ORDER]
+        self.assertEqual(sorted(offsets), offsets, "release-bundle setup is out of order")
+
+        for anchor in self.CI_ANCHORS:
+            with self.subTest(anchor=anchor):
+                tampered = workflow.replace(anchor, TAMPER_TOKEN)
+                self.assertNotEqual(workflow, tampered)
+                with self.assertRaises((AssertionError, ValueError)):
+                    require_anchors(tampered, self.CI_ANCHORS, str(WORKFLOW))
+        for anchor in self.CI_SETUP_ORDER:
+            with self.subTest(job_anchor=anchor):
+                tampered = job.replace(anchor, TAMPER_TOKEN)
+                self.assertNotEqual(job, tampered)
+                with self.assertRaises(AssertionError):
+                    require_anchors(tampered, self.CI_SETUP_ORDER, "release-bundle job")
 
     def test_acceptance_script_preserves_extracted_artifact_contract(self) -> None:
         self._require_with_mutation(BUNDLE_ACCEPTANCE, self.SCRIPT_ANCHORS)
@@ -1129,6 +1158,25 @@ class ReleaseBundleGuardTests(unittest.TestCase):
 
     def test_readiness_records_local_evidence_and_public_followup(self) -> None:
         self._require_with_mutation(RELEASE_READINESS, self.READINESS_ANCHORS)
+
+    def test_changelog_distinguishes_local_evidence_from_public_release(self) -> None:
+        changelog = CHANGELOG_MD.read_text(encoding="utf-8")
+        limitations = changelog.split("### Known open limitations", 1)[1]
+        require_anchors(
+            limitations,
+            self.CHANGELOG_LIMITATION_ANCHORS,
+            "CHANGELOG known limitations",
+        )
+        for anchor in self.CHANGELOG_LIMITATION_ANCHORS:
+            with self.subTest(anchor=anchor):
+                tampered = limitations.replace(anchor, TAMPER_TOKEN)
+                self.assertNotEqual(limitations, tampered)
+                with self.assertRaises(AssertionError):
+                    require_anchors(
+                        tampered,
+                        self.CHANGELOG_LIMITATION_ANCHORS,
+                        "CHANGELOG known limitations",
+                    )
 
 
 if __name__ == "__main__":

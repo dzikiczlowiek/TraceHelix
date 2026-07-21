@@ -171,7 +171,7 @@ jobs:
         run: npm ci
         working-directory: web
       - name: Install Playwright Chromium and OS dependencies
-        run: npm exec -- playwright install --with-deps chromium
+        run: npm exec --offline -- playwright install --with-deps chromium
         working-directory: web
       - name: Verify browser acceptance through the real production topology
         run: bash scripts/verify-browser.sh
@@ -189,8 +189,11 @@ jobs:
           node-version: 24.18.0
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - name: Install locked web dependencies
+        run: npm ci
+        working-directory: web
       - name: Install Playwright Chromium and OS dependencies
-        run: npm exec -- playwright install --with-deps chromium
+        run: npm exec --offline -- playwright install --with-deps chromium
         working-directory: web
       - name: Build twice and verify install from the extracted artifact
         run: bash scripts/verify-release-bundle.sh

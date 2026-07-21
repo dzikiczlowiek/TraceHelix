@@ -108,7 +108,7 @@ The deployment uses separate non-root API and nginx images on a Docker-internal 
 The real-process browser acceptance verifier exercises the production Docker Compose topology (nginx -> API -> SQLite) in Chromium, seeding two committed synthetic JSONL traces through the real containerized CLI and asserting accessible role/label selectors with no retries, mocks, or test-only routes. Install dependencies and the browser once, then run the verifier from the repository root through the Docker group (Docker access is needed locally):
 
 ```bash
-(cd web && npm ci && npm exec -- playwright install --with-deps chromium)
+(cd web && npm ci && npm exec --offline -- playwright install --with-deps chromium)
 sg docker -c "bash scripts/verify-browser.sh"
 ```
 

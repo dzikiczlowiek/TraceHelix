@@ -69,6 +69,6 @@ source release and is not a release announcement.
   under ambient file permissions.
 - Not a network, multi-user, or SaaS service; do not reverse-proxy or expose it.
 - No upload, arbitrary file browsing, live AI/ML, or ONNX inference. Browser
-  acceptance now exercises the source-built compose topology, but there is no
-  published release bundle, tag, release workflow, or install-from-artifact
-  evidence.
+  acceptance and local install-from-artifact evidence exercise the source-built
+  Compose topology, but there is no published release bundle, tag, release
+  workflow, downloaded-public-artifact verification, or signing evidence.
