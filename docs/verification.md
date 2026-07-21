@@ -20,7 +20,14 @@ The initial preferred SQLite dependency restore failed because `SQLitePCLRaw.lib
 
 ## Local and CI gates
 
-CI runs on pushes to `main` and on every pull request. GitHub Actions, setup runtimes, security tools, and external container/stage references are checked against exact repository allowlists. The `ubuntu-24.04` and `windows-2025` hosted-runner labels avoid `latest` aliases, but GitHub can update the underlying VM images; CI runner hosts are not content-addressed.
+CI runs on pushes to `main` and on every pull request. On pull requests every
+checkout explicitly uses `${{ github.event.pull_request.head.sha || github.sha }}`:
+hosted evidence therefore executes the exact PR head rather than GitHub's
+synthetic merge ref; push runs resolve the same expression to `github.sha`.
+GitHub Actions, setup runtimes, security tools, and external container/stage
+references are checked against exact repository allowlists. The `ubuntu-24.04`
+and `windows-2025` hosted-runner labels avoid `latest` aliases, but GitHub can
+update the underlying VM images; CI runner hosts are not content-addressed.
 
 | Area | CI coverage | Local equivalent |
 |---|---|---|
@@ -53,7 +60,10 @@ Record the run URL, successful gate list, downloaded `tracehelix-release-assets`
 file inventory, and the final empty `gh release list` (or the absence of a new
 release) as the no-release assertion. The unified evidence must contain exactly
 the source archive, `SHA256SUMS`, `RELEASE-MANIFEST.json`, release notes, and
-source/API/web SBOMs; `sha256sum -c SHA256SUMS` must pass in that download.
+source/API/web SBOMs. The `assemble-evidence` job output is the deterministic
+SHA-256 over all seven names and bytes; retain it with the run evidence because
+`publish` independently compares it after download. It is not a public eighth
+asset. The source checksum must also pass in that download.
 
 After an independent exact-snapshot review, create and push only a matching tag:
 
@@ -97,3 +107,9 @@ Use `python scripts/source_fingerprint.py` before and after every independent re
 The implementation isolates itself from ambient Git routing and ignore configuration and intentionally excludes index-only state. Staging unchanged bytes therefore preserves the fingerprint; any documentation, source, test, configuration, content, type, or mode change produces a new snapshot and invalidates earlier review verdicts. Before commit, require the reviewed fingerprint both before and after `git add --all`, inspect the staged diff and tree ID, then commit without editing files and require a clean worktree afterward.
 
 A passing release candidate requires all configured gates and independent adversarial reviews to report zero blockers on the same exact snapshot. Green tests from a different fingerprint are not substitute evidence.
+
+Repository guards strictly parse both workflow files, reject duplicate YAML
+keys, and compare the complete canonical parsed semantics against reviewed
+SHA-256 pins. This makes mutations to producer commands, permissions,
+prerequisite handling, concurrency, or publication wiring fail even when the
+edited text preserves an old guard substring.

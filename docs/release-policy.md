@@ -53,6 +53,11 @@ no `if: always()` path that proceeds past a failed gate.
 - No job ever uses `permissions: write-all` or any other broad scope.
 - Every GitHub Action is pinned to a full-length immutable commit SHA, and tools
   and images stay pinned under the existing repository conventions.
+- `scripts/workflow_contract.py` also pins the SHA-256 of each complete,
+  canonically serialized parsed workflow. Comments and formatting do not affect
+  this pin; any semantic change to jobs, gates, permissions, concurrency,
+  dependencies, steps, or action inputs requires an explicit reviewed pin
+  update.
 
 ## Artifact set and immutable handoff
 
@@ -61,24 +66,33 @@ canonical script builds twice, strictly verifies and extracts the archive, then
 runs the extracted policy, install, image, lifecycle, and browser gates. Only
 after those gates it optionally exports the exact verified
 `tracehelix-0.1.0-source.tar.gz`, `SHA256SUMS`, and extracted
-`RELEASE-MANIFEST.json` to an empty external directory. Release notes are then
+`RELEASE-MANIFEST.json` to an empty external directory. The exporter resolves
+the destination and forbidden checkout/work roots canonically, uses exclusive
+creation, and rolls back only paths whose device/inode still match the files it
+created; a concurrent foreign replacement is never deleted. Release notes are then
 generated after that canonical export. The separately pinned source CycloneDX
 action produces `tracehelix-0.1.0-source.cdx.json`; the container producer
 creates `tracehelix-api.spdx.json` and `tracehelix-web.spdx.json` SPDX SBOMs.
 
 The read-only `assemble-evidence` job always runs after every producer/gate. It
 fails unless every prerequisite succeeded, downloads the release evidence plus
-source/API/web SBOM artifacts, verifies the source checksum, rejects any file
-set other than these seven files, and uploads exactly one **immutable**
-`tracehelix-release-assets` artifact. The `publish` job uses
+source/API/web SBOM artifacts, verifies the source checksum and embedded
+manifest, rejects any file set other than these seven flat regular files, and
+computes one deterministic SHA-256 over canonical filenames and bytes. It
+exposes that digest as an `assemble-evidence` job output and uploads exactly one
+**immutable** `tracehelix-release-assets` artifact. `publish` independently
+recomputes and compares that output before provenance or release creation;
+artifact-action digest warnings are not trusted as the binding. The digest is a
+job value, not an eighth public asset. The `publish` job uses
 `actions/download-artifact` only for that unified artifact and **never**
 rebuilds the bundle. A second, unaudited build inside publication is explicitly
 forbidden.
 
 ## Checksums, provenance, and attestation
 
-- `publish` re-verifies `sha256sum -c SHA256SUMS` over the source archive before
-  doing anything else.
+- `publish` independently re-verifies the exact seven-file handoff digest,
+  source checksum, external/embedded manifest identity, and `tag == VERSION`
+  before provenance or release creation.
 - On a tag event `publish` records build **provenance** and an **attestation**
   for the source archive using `actions/attest-build-provenance`, which requires
   `id-token: write`.
@@ -87,8 +101,9 @@ forbidden.
 
 ## Never overwrite
 
-- `publish` checks `gh release view "$TAG"` before creating anything; if a
-  release already exists for that tag, the job fails rather than overwriting it.
+- `publish` proceeds past its preflight only when `gh api --include` returns an
+  authoritative HTTP 404 for the tag; an existing release, authentication or
+  network error, and every non-404 API result fail closed.
 - Tags are never force-pushed by this workflow; a release is created exactly
   once for a given tag; it must never overwrite an existing release or tag.
 

@@ -27,6 +27,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Validate tag equals VERSION exactly
         id: tag
         run: |
@@ -60,6 +63,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Verify repository security guards
         run: python scripts/test_repository_guards.py
       - name: Verify external build dependency pins
@@ -72,6 +78,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Set up .NET 10
         uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0
         with:
@@ -104,6 +113,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Set up .NET 10 for contract generation
         uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0
         with:
@@ -141,6 +153,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
         with:
@@ -164,6 +179,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Set up .NET 10
         uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0
         with:
@@ -184,6 +202,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Build digest-pinned production images
         run: docker compose --profile tools build --pull
       - name: Generate API SBOM
@@ -229,6 +250,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Set up Node.js 24
         uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
@@ -251,6 +275,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Set up Node.js 24
         uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
@@ -333,6 +360,8 @@ jobs:
     name: Assemble immutable unified release assets (read-only)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    outputs:
+      handoff_digest: ${{ steps.assemble.outputs.handoff_digest }}
     needs:
       - validate-tag
       - guards
@@ -347,6 +376,11 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Fail unless every required producer and gate succeeded
         run: |
           set -euo pipefail
@@ -387,30 +421,13 @@ jobs:
         with:
           name: tracehelix-web.spdx.json
           path: unified
-      - name: Assert exact artifact set and verify source checksum
+      - name: Assemble and bind exact release assets
+        id: assemble
         env:
           VERSION: ${{ needs.validate-tag.outputs.version }}
         run: |
           set -euo pipefail
-          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
-            echo "validated VERSION output is not canonical SemVer: $VERSION" >&2
-            exit 1
-          }
-          ARCHIVE="tracehelix-${VERSION}-source.tar.gz"
-          expected=$(printf '%s\n' \
-            "$ARCHIVE" SHA256SUMS RELEASE-MANIFEST.json RELEASE-NOTES.md \
-            "tracehelix-${VERSION}-source.cdx.json" \
-            tracehelix-api.spdx.json tracehelix-web.spdx.json | LC_ALL=C sort)
-          [[ -z "$(find unified -mindepth 1 ! -type f -print -quit)" ]] || {
-            echo "unified artifact handoff must be flat regular files" >&2
-            exit 1
-          }
-          actual=$(find unified -mindepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
-          [[ "$actual" == "$expected" ]] || {
-            printf 'unexpected unified artifact set:\n%s\n' "$actual" >&2
-            exit 1
-          }
-          ( cd unified && sha256sum -c SHA256SUMS )
+          python3 scripts/release_assets.py assemble --directory unified --version "$VERSION" --github-output "$GITHUB_OUTPUT"
       - name: Upload immutable unified release assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -440,25 +457,31 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Download immutable unified release assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: tracehelix-release-assets
           path: release
-      - name: Re-verify checksum and refuse to overwrite an existing release
+      - name: Verify exact handoff digest and release preconditions
         env:
-          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.validate-tag.outputs.version }}
+          HANDOFF_DIGEST: ${{ needs.assemble-evidence.outputs.handoff_digest }}
         run: |
           set -euo pipefail
-          ARCHIVE="tracehelix-${VERSION}-source.tar.gz"
           TAG="${GITHUB_REF#refs/tags/}"
-          [[ "$TAG" == "v$VERSION" ]] || { echo "tag $TAG != v$VERSION" >&2; exit 1; }
-          ( cd release && sha256sum -c SHA256SUMS )
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release $TAG already exists; refusing to overwrite" >&2
-            exit 1
-          fi
+          python3 scripts/release_assets.py verify-publish --directory release --version "$VERSION" --tag "$TAG" --expected-digest "$HANDOFF_DIGEST"
+      - name: Refuse to overwrite an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          python3 scripts/release_assets.py assert-release-absent --tag "$TAG"
       - name: Attest build provenance for the source archive
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
@@ -467,18 +490,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.validate-tag.outputs.version }}
+          HANDOFF_DIGEST: ${{ needs.assemble-evidence.outputs.handoff_digest }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
-          ARCHIVE="tracehelix-${VERSION}-source.tar.gz"
-          gh release create "$TAG" \
-            --verify-tag \
-            --title "TraceHelix ${VERSION}" \
-            --notes-file release/RELEASE-NOTES.md \
-            "release/$ARCHIVE" \
-            release/SHA256SUMS \
-            release/RELEASE-MANIFEST.json \
-            release/RELEASE-NOTES.md \
-            "release/tracehelix-${VERSION}-source.cdx.json" \
-            release/tracehelix-api.spdx.json \
-            release/tracehelix-web.spdx.json
+          python3 scripts/release_assets.py create-release --directory release --version "$VERSION" --tag "$TAG" --expected-digest "$HANDOFF_DIGEST"

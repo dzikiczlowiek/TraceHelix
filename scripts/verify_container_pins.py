@@ -79,11 +79,13 @@ EXPECTED_RELEASE_ACTIONS = [
     "actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903",
     "anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11",
     "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
     "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
     "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
     "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
     "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
     "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
     "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
     "actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be",
 ]

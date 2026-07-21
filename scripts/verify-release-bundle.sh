@@ -5,39 +5,14 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK=""
 VERIFIED_OUTPUT_DIR=${TRACEHELIX_VERIFIED_OUTPUT_DIR:-}
-EXPORTED_OUTPUT_DIR=""
-EXPORTED_FILES=()
 
 note() { printf 'verify-release-bundle: %s\n' "$*" >&2; }
 die() { note "ERROR: $*"; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-rollback_verified_export() {
-  local name
-  [[ -n "$EXPORTED_OUTPUT_DIR" ]] || return 0
-  # Only names successfully created by this invocation are removed. This makes
-  # a failed optional export leave its required pre-existing destination empty.
-  for name in "${EXPORTED_FILES[@]}"; do
-    python3 - "$EXPORTED_OUTPUT_DIR" "$name" <<'PY'
-import os
-import sys
-
-parent = sys.argv[1]
-name = sys.argv[2]
-try:
-    os.unlink(os.path.join(parent, name))
-except FileNotFoundError:
-    pass
-PY
-  done
-}
-
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
-  if [[ $rc -ne 0 ]]; then
-    rollback_verified_export
-  fi
   if [[ -n "$WORK" ]]; then
     if ! rm -rf -- "$WORK"; then
       note "WARNING: rm cleanup failed; using independent fallback for owned work directory: $WORK"
@@ -50,78 +25,19 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-copy_verified_file_exclusively() {
-  local source=$1
-  local destination=$2
-  python3 - "$source" "$destination" <<'PY'
-import os
-import sys
-
-source, destination = sys.argv[1:]
-source_fd = destination_fd = None
-created = False
-try:
-    source_fd = os.open(source, os.O_RDONLY)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    destination_fd = os.open(destination, flags, 0o644)
-    created = True
-    while True:
-        chunk = os.read(source_fd, 1024 * 1024)
-        if not chunk:
-            break
-        view = memoryview(chunk)
-        while view:
-            written = os.write(destination_fd, view)
-            view = view[written:]
-    os.fsync(destination_fd)
-except BaseException:
-    if destination_fd is not None:
-        os.close(destination_fd)
-        destination_fd = None
-    if created:
-        try:
-            os.unlink(destination)
-        except OSError:
-            pass
-    raise
-finally:
-    if source_fd is not None:
-        os.close(source_fd)
-    if destination_fd is not None:
-        os.close(destination_fd)
-PY
-}
-
 export_verified_output() {
-  local destination root_real work_real name source
+  local destination
   [[ -n "$VERIFIED_OUTPUT_DIR" ]] || return 0
   destination=$VERIFIED_OUTPUT_DIR
   [[ "$destination" = /* ]] || die "destination must be an absolute path"
-  [[ -d "$destination" && ! -L "$destination" ]] || \
-    die "destination must be a pre-existing empty directory"
-  destination=$(cd "$destination" && pwd -P)
-  root_real=$(cd "$ROOT" && pwd -P)
-  work_real=$(cd "$WORK" && pwd -P)
-  case "$destination" in
-    "$root_real"|"$root_real"/*|"$work_real"|"$work_real"/*)
-      die "destination must be outside the checkout and work directory"
-      ;;
-  esac
-  [[ -z "$(find "$destination" -mindepth 1 -maxdepth 1 -print -quit)" ]] || \
-    die "destination must be a pre-existing empty directory"
-
-  EXPORTED_OUTPUT_DIR=$destination
-  for name in "$ARCHIVE" SHA256SUMS RELEASE-MANIFEST.json; do
-    case "$name" in
-      "$ARCHIVE"|SHA256SUMS) source="$OUT_A/$name" ;;
-      RELEASE-MANIFEST.json) source="$SOURCE/$name" ;;
-    esac
-    [[ -f "$source" && ! -L "$source" ]] || die "verified export source is missing: $source"
-    EXPORTED_FILES+=("$name")
-    copy_verified_file_exclusively "$source" "$destination/$name"
-  done
+  python3 "$ROOT/scripts/release_assets.py" export-verified \
+    --archive "$OUT_A/$ARCHIVE" \
+    --checksums "$OUT_A/SHA256SUMS" \
+    --manifest "$SOURCE/RELEASE-MANIFEST.json" \
+    --version "$VERSION" \
+    --destination "$destination" \
+    --forbidden-root "$ROOT" \
+    --forbidden-root "$WORK"
   note "exported verified archive, checksum, and extracted manifest to $destination"
 }
 
