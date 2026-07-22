@@ -9,13 +9,12 @@ import os
 from pathlib import Path
 import re
 import shutil
-import signal
 import subprocess
 import tempfile
-import time
 import tomllib
 import unittest
 import xml.etree.ElementTree as ET
+
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +22,7 @@ FINGERPRINT = ROOT / "scripts" / "source_fingerprint.py"
 PIN_VERIFIER = ROOT / "scripts" / "verify_container_pins.py"
 DOCKERFILE = ROOT / "Dockerfile"
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 NGINX_CONF = ROOT / "deploy" / "nginx.conf"
 COMPOSE_LIFECYCLE = ROOT / "scripts" / "verify-compose-lifecycle.sh"
 VERSION = ROOT / "VERSION"
@@ -36,6 +36,7 @@ CODEOWNERS = ROOT / ".github" / "CODEOWNERS"
 PR_TEMPLATE = ROOT / ".github" / "pull_request_template.md"
 RELEASE_READINESS = ROOT / "docs" / "release-readiness-v0.1.0.md"
 VERIFICATION_MD = ROOT / "docs" / "verification.md"
+RELEASE_POLICY_MD = ROOT / "docs" / "release-policy.md"
 README = ROOT / "README.md"
 ARCHITECTURE = ROOT / "docs" / "architecture.md"
 BROWSER_VERIFIER = ROOT / "scripts" / "verify-browser.sh"
@@ -288,7 +289,10 @@ class RepositoryPrivacyTests(unittest.TestCase):
 
 class ContainerPinVerifierTests(unittest.TestCase):
     def run_verifier(
-        self, dockerfile: str, workflow: str | None = None
+        self,
+        dockerfile: str,
+        workflow: str | None = None,
+        release_workflow: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory(prefix="tracehelix-container-pins-") as temp:
             root = Path(temp)
@@ -298,6 +302,16 @@ class ContainerPinVerifierTests(unittest.TestCase):
             (root / "Dockerfile").write_text(dockerfile, encoding="utf-8")
             (root / ".github" / "workflows" / "ci.yml").write_text(
                 workflow if workflow is not None else WORKFLOW.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            # The verifier now covers release.yml with its own exact allowlist,
+            # so every fixture materializes a release workflow too. Tests that
+            # do not care about release.yml get the real, valid file; tests that
+            # mutate it pass an explicit override.
+            (root / ".github" / "workflows" / "release.yml").write_text(
+                release_workflow
+                if release_workflow is not None
+                else RELEASE_WORKFLOW.read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
             return subprocess.run(
@@ -381,6 +395,14 @@ class ContainerPinVerifierTests(unittest.TestCase):
         result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), mutated)
         self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_rejects_a_quoted_valid_action_key(self) -> None:
+        # Exact action text is not enough: a quoted YAML key is an unsupported
+        # syntax escape even when it names an otherwise approved full SHA.
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutated = workflow.replace("        uses: actions/checkout@", "        'uses': actions/checkout@", 1)
+        result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), mutated)
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_rejects_unknown_shorthand_github_action_step(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         marker = "      - name: Generate API SBOM"
@@ -433,18 +455,106 @@ class ContainerPinVerifierTests(unittest.TestCase):
         result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), mutated)
         self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_pin_verifier_covers_the_release_workflow(self) -> None:
+        # The pin verifier must extend its exact ordered SHA allowlist to the
+        # release workflow, not only ci.yml. Running against the real repo,
+        # it must pass and its summary must mention the release coverage.
+        result = subprocess.run(
+            ["python", str(PIN_VERIFIER)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("release", result.stdout.lower(), result.stdout + result.stderr)
+
+    def test_rejects_an_unapproved_release_runtime_selector(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        mutated = workflow.replace("node-version: 24.18.0", "node-version: 24.19.0", 1)
+        result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), None, mutated)
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_rejects_a_mutable_release_action_reference(self) -> None:
+        # A mutable tag on any release.yml action must fail closed independently
+        # of ci.yml, which is left at its real, valid value.
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        mutated, count = re.subn(
+            r"actions/checkout@[0-9a-f]{40}",
+            "actions/checkout@v6",
+            workflow,
+            count=1,
+        )
+        self.assertEqual(1, count)
+        result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), None, mutated)
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_rejects_an_unapproved_release_action_reference(self) -> None:
+        # An attacker action pinned to a full SHA still fails because it is not
+        # on the exact ordered release allowlist.
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        marker = "      - name: Check out repository\n"
+        self.assertIn(marker, workflow)
+        mutated = workflow.replace(
+            marker,
+            "      - uses: attacker/exfiltrate@abcdef1234567890abcdef1234567890abcdef12\n"
+            + marker,
+            1,
+        )
+        result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), None, mutated)
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_rejects_quoted_release_uses_key(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        marker = "      - name: Check out repository\n"
+        self.assertIn(marker, workflow)
+        mutated = workflow.replace(
+            marker,
+            '      - { "uses": attacker/exfiltrate@abcdef1234567890abcdef1234567890abcdef12 }\n'
+            + marker,
+            1,
+        )
+        result = self.run_verifier(DOCKERFILE.read_text(encoding="utf-8"), None, mutated)
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_rejects_a_missing_release_workflow_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="tracehelix-container-pins-") as temp:
+            root = Path(temp)
+            (root / "scripts").mkdir()
+            (root / ".github" / "workflows").mkdir(parents=True)
+            shutil.copy2(PIN_VERIFIER, root / "scripts" / PIN_VERIFIER.name)
+            (root / "Dockerfile").write_text(
+                DOCKERFILE.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            (root / ".github" / "workflows" / "ci.yml").write_text(
+                WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            # release.yml is intentionally absent: the verifier must fail closed.
+            result = subprocess.run(
+                ["python", str(root / "scripts" / PIN_VERIFIER.name)],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("release.yml", result.stdout + result.stderr)
+
 
 class CriticalInvariantTests(unittest.TestCase):
     """Guard reviewed DNS configuration and lifecycle script bytes."""
 
-    RESOLVER = "resolver 127.0.0.11 valid=5s ipv6=off;"
-    ZONE = "zone tracehelix_api 64k;"
-    RESOLVABLE_SERVER = "server api:5080 resolve;"
+    RESOLVER = "resolver 127.0.0.11 valid=1s ipv6=off;"
+    API_VARIABLE = "set $tracehelix_api api:5080;"
+    API_PROXY_PASS = "proxy_pass http://$tracehelix_api$request_uri;"
+    API_LOCATION = "location ~ ^/(api|health)/ {"
+    API_SERVER_NAME = "server_name 127.0.0.1 localhost;"
     BLOCKER_REUSES_OLD_IP = '[[ "$blocker_ip" == "$old_api_ip" ]]'
     NEW_API_USES_NEW_IP = '[[ -n "$new_api_ip" && "$new_api_ip" != "$old_api_ip" ]]'
+    WEB_ID_UNCHANGED = '[[ "$web_id_after_api_recreate" == "$web_id" ]]'
     # Intentional lifecycle edits require review and an explicit digest update.
     EXPECTED_LIFECYCLE_SHA256 = (
-        "d0b9cb9518b53f375ced8dcf1239f39df61d49b60d3fdca456c882e07e5c6c5d"
+        "bc04e2f9c23c0dcd5feff2877d56e7fc6c53ed3d2fd26abedcbbda45f3d1359b"
     )
 
     @staticmethod
@@ -530,48 +640,91 @@ class CriticalInvariantTests(unittest.TestCase):
             )
         return top_level
 
-    def _upstream_lines(self, nginx_lines: list[str]) -> list[str]:
-        opening = "upstream tracehelix_api {"
-        try:
-            start = nginx_lines.index(opening)
-        except ValueError:
-            self.fail(f"Missing active nginx block: {opening!r}")
+    def _all_direct_block_lines(
+        self, nginx_lines: list[str], opening: str
+    ) -> list[list[str]]:
+        """Return direct active directives for every exact nginx block opening."""
+        blocks: list[list[str]] = []
+        for start, line in enumerate(nginx_lines):
+            if line != opening:
+                continue
+            depth = self._brace_delta(opening)
+            self.assertEqual(1, depth, f"Malformed nginx block opening: {opening!r}")
+            direct: list[str] = []
+            for child in nginx_lines[start + 1 :]:
+                next_depth = depth + self._brace_delta(child)
+                if depth == 1 and next_depth >= 1:
+                    direct.append(child)
+                depth = next_depth
+                if depth == 0:
+                    blocks.append(direct)
+                    break
+            else:
+                self.fail(f"Unclosed active nginx block: {opening!r}")
+        return blocks
 
-        depth = 0
-        block = []
-        for index in range(start, len(nginx_lines)):
-            line = nginx_lines[index]
-            depth += self._brace_delta(line)
-            if index != start and depth > 0:
-                block.append(line)
-            if index != start and depth == 0:
-                return block
-        self.fail(f"Unclosed active nginx block: {opening!r}")
+    def _direct_block_lines(
+        self, nginx_lines: list[str], opening: str
+    ) -> list[str]:
+        blocks = self._all_direct_block_lines(nginx_lines, opening)
+        self.assertEqual(1, len(blocks), f"Expected one active nginx block: {opening!r}")
+        return blocks[0]
 
     def _assert_nginx_invariants(self, nginx_text: str) -> None:
         nginx_lines = self._active_lines(nginx_text)
         top_level_lines = self._top_level_lines(nginx_lines)
-        upstream_lines = self._upstream_lines(nginx_lines)
-
-        checks = (
-            (
-                top_level_lines,
-                self.RESOLVER,
-                "active Docker DNS resolver at http/top-level scope",
-            ),
-            (
-                upstream_lines,
-                self.ZONE,
-                "shared zone inside the tracehelix_api upstream",
-            ),
-            (
-                upstream_lines,
-                self.RESOLVABLE_SERVER,
-                "runtime-resolved API server inside the tracehelix_api upstream",
-            ),
+        resolver_lines = [line for line in nginx_lines if line.startswith("resolver ")]
+        self.assertEqual(
+            [self.RESOLVER],
+            resolver_lines,
+            "Require exactly one active, canonical Docker DNS resolver; nested or decoy resolvers are forbidden",
         )
-        for haystack, needle, label in checks:
-            self.assertIn(needle, haystack, f"Missing {label}: {needle!r}")
+        self.assertEqual(
+            [self.RESOLVER],
+            [line for line in top_level_lines if line.startswith("resolver ")],
+            "Docker DNS resolver must be active at http/top-level scope",
+        )
+        self.assertFalse(
+            any(line.startswith("upstream ") for line in nginx_lines),
+            "The stale upstream resolve form is forbidden; proxy through the runtime DNS variable instead",
+        )
+        self.assertEqual(
+            [self.API_VARIABLE],
+            [line for line in nginx_lines if line.startswith("set ")],
+            "Require exactly one active API runtime DNS variable",
+        )
+        self.assertEqual(
+            [self.API_PROXY_PASS],
+            [line for line in nginx_lines if line.startswith("proxy_pass ")],
+            "Require exactly one API proxy_pass preserving the original request URI",
+        )
+
+        api_server_blocks = [
+            direct
+            for direct in self._all_direct_block_lines(nginx_lines, "server {")
+            if self.API_SERVER_NAME in direct and self.API_LOCATION in direct
+        ]
+        self.assertEqual(
+            1,
+            len(api_server_blocks),
+            "API proxy location must be a direct child of the allowed-host server block",
+        )
+        location_direct = self._direct_block_lines(nginx_lines, self.API_LOCATION)
+        required_location_directives = (
+            self.API_VARIABLE,
+            self.API_PROXY_PASS,
+            "proxy_http_version 1.1;",
+            "proxy_set_header Host $http_host;",
+            "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+            "proxy_set_header X-Forwarded-Proto $scheme;",
+            "proxy_hide_header Server;",
+        )
+        for directive in required_location_directives:
+            self.assertIn(
+                directive,
+                location_direct,
+                f"Missing required direct API proxy directive: {directive!r}",
+            )
 
     def _assert_lifecycle_digest(self, lifecycle_bytes: bytes) -> None:
         actual = hashlib.sha256(lifecycle_bytes).hexdigest()
@@ -596,9 +749,9 @@ class CriticalInvariantTests(unittest.TestCase):
         self._assert_nginx_invariants(NGINX_CONF.read_text(encoding="utf-8"))
         self._assert_lifecycle_digest(COMPOSE_LIFECYCLE.read_bytes())
 
-    def test_commented_nginx_invariants_are_rejected(self) -> None:
+    def test_commented_nginx_runtime_dns_invariants_are_rejected(self) -> None:
         nginx_text = NGINX_CONF.read_text(encoding="utf-8")
-        for needle in (self.RESOLVER, self.ZONE, self.RESOLVABLE_SERVER):
+        for needle in (self.RESOLVER, self.API_VARIABLE, self.API_PROXY_PASS):
             with self.subTest(needle=needle):
                 mutated = self._comment_out(nginx_text, needle)
                 with self.assertRaises(AssertionError):
@@ -608,9 +761,11 @@ class CriticalInvariantTests(unittest.TestCase):
         lifecycle_text = COMPOSE_LIFECYCLE.read_text(encoding="utf-8")
         blocker = self.BLOCKER_REUSES_OLD_IP
         new_api = self.NEW_API_USES_NEW_IP
+        web_id = self.WEB_ID_UNCHANGED
         mutations = {
             "comment-blocker-assertion": self._comment_out(lifecycle_text, blocker),
             "comment-new-api-assertion": self._comment_out(lifecycle_text, new_api),
+            "comment-web-identity-assertion": self._comment_out(lifecycle_text, web_id),
             "quoted-heredoc": lifecycle_text.replace(
                 blocker,
                 ": <<'INERT_GUARD_TEXT'\n"
@@ -649,6 +804,11 @@ class CriticalInvariantTests(unittest.TestCase):
                 f"if false; then\n  {new_api}\nfi",
                 1,
             ),
+            "unreachable-web-identity-assertion": lifecycle_text.replace(
+                web_id,
+                f"if false; then\n  {web_id}\nfi",
+                1,
+            ),
         }
 
         for label, mutated in mutations.items():
@@ -661,7 +821,7 @@ class CriticalInvariantTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     self._assert_lifecycle_digest(mutated.encode("utf-8"))
 
-    def test_quoted_comment_and_braces_do_not_deceive_nginx_parser(self) -> None:
+    def test_runtime_dns_structure_rejects_stale_decoys_and_relocation(self) -> None:
         quoted_line = 'guard "# not-comment }"; # real comment'
         self.assertEqual(
             'guard "# not-comment }";', self._strip_unquoted_comment(quoted_line)
@@ -669,33 +829,39 @@ class CriticalInvariantTests(unittest.TestCase):
         self.assertEqual(0, self._brace_delta(self._strip_unquoted_comment(quoted_line)))
 
         nginx_text = NGINX_CONF.read_text(encoding="utf-8")
-        for needle in (self.ZONE, self.RESOLVABLE_SERVER):
-            with self.subTest(needle=needle):
-                moved = nginx_text.replace(f"    {needle}\n", "", 1)
-                moved = moved.replace(
-                    "upstream tracehelix_api {\n",
-                    'upstream tracehelix_api {\n    guard "{";\n',
-                    1,
-                )
-                moved += f"\n{needle}\n"
-                with self.assertRaises(AssertionError):
-                    self._assert_nginx_invariants(moved)
-
-    def test_resolver_nested_in_a_server_block_is_rejected(self) -> None:
-        nginx_text = NGINX_CONF.read_text(encoding="utf-8")
-        # The exact directive bytes stay active in the file, but only inside a
-        # nested server block where nginx leaves resolver inert for runtime
-        # resolution. A line-anywhere scan would miss this weakening, so the
-        # depth-zero scope check must be what rejects it.
-        self.assertIn(self.RESOLVER + "\n", nginx_text)
-        moved = nginx_text.replace(
+        nested_resolver = nginx_text.replace(
             self.RESOLVER + "\n",
             "server {\n    " + self.RESOLVER + "\n}\n",
             1,
         )
-        self.assertIn(self.RESOLVER, self._active_lines(moved))
-        with self.assertRaises(AssertionError):
-            self._assert_nginx_invariants(moved)
+        variable_outside_location = nginx_text.replace(
+            "        " + self.API_VARIABLE + "\n", "", 1
+        ).replace(
+            self.API_SERVER_NAME + "\n",
+            self.API_SERVER_NAME + "\n    " + self.API_VARIABLE + "\n",
+            1,
+        )
+        mutations = {
+            "active-stale-upstream": nginx_text
+            + "\nupstream tracehelix_api {\n    server api:5080 resolve;\n}\n",
+            "second-resolver-decoy": nginx_text
+            + "\nresolver 127.0.0.11 valid=5s ipv6=off;\n",
+            "nested-resolver": nested_resolver,
+            "variable-outside-api-location": variable_outside_location,
+            "altered-proxy-uri": nginx_text.replace(
+                self.API_PROXY_PASS, "proxy_pass http://$tracehelix_api;", 1
+            ),
+            "altered-api-location": nginx_text.replace(
+                self.API_LOCATION, "location ~ ^/api/ {", 1
+            ),
+            "dropped-host-forwarding": self._comment_out(
+                nginx_text, "proxy_set_header Host $http_host;"
+            ),
+        }
+        for label, mutated in mutations.items():
+            with self.subTest(label=label):
+                with self.assertRaises(AssertionError):
+                    self._assert_nginx_invariants(mutated)
 
     def test_unbalanced_nginx_braces_fail_closed(self) -> None:
         nginx_text = NGINX_CONF.read_text(encoding="utf-8")
@@ -1038,89 +1204,165 @@ class BrowserAcceptanceGuardTests(unittest.TestCase):
         self._require_anchors_with_mutation(README, self.README_BROWSER_ANCHORS)
 
 
-class ReleaseBundleGuardTests(unittest.TestCase):
-    """Guard deterministic bundle creation, verification, and artifact smoke."""
+class WorkflowContractGuardTests(unittest.TestCase):
+    """Execute the strict parsed-workflow contract, not textual workflow scans."""
 
-    REQUIRED_FILES = (
-        BUNDLE_BUILDER,
-        BUNDLE_BUILDER_TESTS,
-        BUNDLE_VERIFIER,
-        BUNDLE_VERIFIER_TESTS,
-        BUNDLE_ACCEPTANCE,
+    def _run_contract_cli_with_ci(self, ci: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory(prefix="tracehelix-workflow-contract-") as tmp:
+            root = Path(tmp)
+            scripts = root / "scripts"
+            workflows = root / ".github" / "workflows"
+            scripts.mkdir()
+            workflows.mkdir(parents=True)
+            shutil.copy2(ROOT / "scripts" / "workflow_contract.py", scripts)
+            (workflows / "ci.yml").write_text(ci, encoding="utf-8")
+            shutil.copy2(RELEASE_WORKFLOW, workflows / "release.yml")
+            return subprocess.run(
+                ["python3", str(scripts / "workflow_contract.py")],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+    def test_repository_workflow_contract(self) -> None:
+        result = subprocess.run(
+            ["python3", str(ROOT / "scripts" / "workflow_contract.py")],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_release_asset_behavior_and_adversarial_mutation_harness_are_green(self) -> None:
+        result = subprocess.run(
+            ["python3", "scripts/adversarial_release_mutations.py"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_semantic_digests_match_reviewed_workflow_pins(self) -> None:
+        import workflow_contract
+
+        ci = workflow_contract.load_strict(WORKFLOW.read_text(encoding="utf-8"))
+        release = workflow_contract.load_strict(
+            RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            workflow_contract.CI_SEMANTIC_SHA256,
+            workflow_contract.semantic_digest(ci),
+        )
+        self.assertEqual(
+            workflow_contract.RELEASE_SEMANTIC_SHA256,
+            workflow_contract.semantic_digest(release),
+        )
+
+    def test_workflow_contract_cli_rejects_lone_surrogate_without_traceback(self) -> None:
+        original = WORKFLOW.read_text(encoding="utf-8")
+        ci = original.replace("name: CI", 'name: "\\ud83d evil"', 1)
+        self.assertNotEqual(original, ci)
+        result = self._run_contract_cli_with_ci(ci)
+
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertEqual("", result.stdout)
+        self.assertIn("workflow_contract:", result.stderr)
+        self.assertIn("workflow semantics are not hashable", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotIn("UnicodeEncodeError", result.stderr)
+
+    def test_workflow_contract_cli_rejects_deep_nesting_without_traceback(self) -> None:
+        depth = 700
+        ci = "name: CI\non:\n" + "".join(
+            "  " * level + f"k{level}:\n" for level in range(1, depth + 1)
+        )
+        ci += "  " * (depth + 1) + "leaf: value\n"
+        result = self._run_contract_cli_with_ci(ci)
+
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertEqual("", result.stdout)
+        self.assertIn("workflow_contract: invalid workflow YAML", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotIn("RecursionError", result.stderr)
+
+    def test_strict_loader_rejects_duplicate_keys_at_any_mapping_depth(self) -> None:
+        import workflow_contract
+
+        for text in ("name: one\nname: two\n", "a:\n  b: one\n  b: two\n"):
+            with self.subTest(text=text):
+                with self.assertRaises(workflow_contract.WorkflowContractError):
+                    workflow_contract.load_strict(text)
+
+    def test_strict_loader_rejects_duplicate_subject_path_last_wins(self) -> None:
+        import workflow_contract
+
+        text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        needle = "          subject-path: release/tracehelix-${{ needs.validate-tag.outputs.version }}-source.tar.gz\n"
+        mutated = text.replace(needle, needle + "          subject-path: release/RELEASE-NOTES.md\n", 1)
+        with self.assertRaises(workflow_contract.WorkflowContractError):
+            workflow_contract.load_strict(mutated)
+
+    def test_contract_rejects_dead_code_decoy_and_merge_checkout(self) -> None:
+        import workflow_contract
+
+        release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        ci = WORKFLOW.read_text(encoding="utf-8")
+        mutations = (
+            release.replace(
+                'python3 scripts/release_assets.py verify-publish --directory release --version "$VERSION" --tag "$TAG" --expected-digest "$HANDOFF_DIGEST"',
+                'if false; then python3 scripts/release_assets.py verify-publish --directory release --version "$VERSION" --tag "$TAG" --expected-digest "$HANDOFF_DIGEST"; fi',
+                1,
+            ),
+            release.replace(
+                'python3 scripts/release_assets.py create-release --directory release --version "$VERSION" --tag "$TAG"',
+                'gh release create "$TAG" -- release/EXTRA-ASSET',
+                1,
+            ),
+        )
+        for mutated in mutations:
+            with self.subTest(mutated=mutated[-80:]):
+                with self.assertRaises(workflow_contract.WorkflowContractError):
+                    workflow_contract.validate_release(workflow_contract.load_strict(mutated))
+        merge_ref = ci.replace(workflow_contract.CHECKOUT_REF, "${{ github.sha }}", 1)
+        with self.assertRaises(workflow_contract.WorkflowContractError):
+            workflow_contract.validate_ci(workflow_contract.load_strict(merge_ref))
+
+
+class ReleasePolicyGuardTests(unittest.TestCase):
+    """Guard docs/release-policy.md for honest, fail-closed release claims."""
+
+    REQUIRED_ANCHORS = (
+        "docs/release-policy.md",
+        "fail-closed",
+        "local trusted single-user",
+        "not production-grade",
+        "tag equals VERSION",
+        "never overwrite",
+        "contents: read",
+        "contents: write, id-token: write, attestations: write",
+        "workflow_dispatch",
+        "never publishes",
+        "immutable",
+        "download-artifact",
+        "CycloneDX",
+        "SPDX",
+        "provenance",
+        "attestation",
+        "public-download verification",
+        "no release has been created",
     )
-    CI_ANCHORS = (
-        "  release-bundle:",
-        "name: Release bundle acceptance",
-        "timeout-minutes: 35",
-        "bash scripts/verify-release-bundle.sh",
-        "npm exec --offline -- playwright install --with-deps chromium",
-    )
-    CI_SETUP_ORDER = (
-        "name: Install locked web dependencies",
-        "run: npm ci",
-        "npm exec --offline -- playwright install --with-deps chromium",
-        "bash scripts/verify-release-bundle.sh",
-    )
-    SCRIPT_ANCHORS = (
-        "build_release_bundle.py",
-        'cmp "$OUT_A/$ARCHIVE" "$OUT_B/$ARCHIVE"',
-        "verify_release_bundle.py",
-        'SOURCE="$EXTRACT/tracehelix-$VERSION"',
-        "scripts/test_repository_guards.py",
-        "docker compose --profile tools build --pull",
-        "bash scripts/verify-compose-lifecycle.sh",
-        "bash scripts/verify-browser.sh",
-    )
-    BUILDER_EXCLUSION_ANCHORS = (
-        "_FORBIDDEN_RELEASE_COMPONENTS",
-        '".hermes"',
-        '"test-results"',
-        '"playwright-report"',
-        '".db"',
-        'folded_components[0] == "imports"',
-    )
-    VERIFIER_EXCLUSION_ANCHORS = (
-        "FORBIDDEN_RELEASE_COMPONENTS",
-        '".hermes"',
-        '"test-results"',
-        '"playwright-report"',
-        '".db"',
-        'components[0] == "imports"',
-        "forbidden release source path",
-    )
-    README_ANCHORS = (
-        "Deterministic release bundle",
-        'sg docker -c "bash scripts/verify-release-bundle.sh"',
-        "Release bundle acceptance",
-        "install-from-artifact evidence",
-    )
-    VERIFICATION_ANCHORS = (
-        "Release bundle acceptance",
-        'sg docker -c "bash scripts/verify-release-bundle.sh"',
-        "Two byte-identical source bundles",
-    )
-    READINESS_ANCHORS = (
-        "deterministic local source bundle",
-        "install-from-artifact evidence",
-        "no public tag",
-    )
-    CHANGELOG_LIMITATION_ANCHORS = (
-        "local install-from-artifact evidence",
-        "no published release bundle",
-        "downloaded-public-artifact verification",
-    )
-    ARCHITECTURE_BUNDLE_ANCHORS = (
-        "deterministic local source-bundle",
-        "install-from-artifact evidence",
-        "public release",
-        "downloaded-public-artifact verification",
-    )
-    COMPOSE_LIFECYCLE_TEARDOWN_ANCHORS = (
-        "com.docker.compose.project",
-        "teardown left Docker resources",
+    FORBIDDEN_OVERCLAIM_PHRASES = (
+        "is production-grade",
+        "publicly available",
+        "has been published",
     )
 
-    def _require_with_mutation(self, path: Path, anchors: tuple[str, ...]) -> None:
+    def _require_with_mutation(
+        self, path: Path, anchors: tuple[str, ...]
+    ) -> None:
         text = path.read_text(encoding="utf-8")
         require_anchors(text, anchors, str(path))
         for anchor in anchors:
@@ -1130,131 +1372,21 @@ class ReleaseBundleGuardTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     require_anchors(tampered, anchors, str(path))
 
-    def test_bundle_files_are_present(self) -> None:
-        missing = [str(path) for path in self.REQUIRED_FILES if not path.is_file()]
-        self.assertEqual([], missing, f"missing release bundle files: {missing}")
-
-    def test_ci_release_bundle_job_is_required(self) -> None:
-        workflow = WORKFLOW.read_text(encoding="utf-8")
-        require_anchors(workflow, self.CI_ANCHORS, str(WORKFLOW))
-        job = workflow.split("  release-bundle:", 1)[1].split("\n  python:", 1)[0]
-        require_anchors(job, self.CI_SETUP_ORDER, "release-bundle job")
-        offsets = [job.index(anchor) for anchor in self.CI_SETUP_ORDER]
-        self.assertEqual(sorted(offsets), offsets, "release-bundle setup is out of order")
-
-        for anchor in self.CI_ANCHORS:
-            with self.subTest(anchor=anchor):
-                tampered = workflow.replace(anchor, TAMPER_TOKEN)
-                self.assertNotEqual(workflow, tampered)
-                with self.assertRaises((AssertionError, ValueError)):
-                    require_anchors(tampered, self.CI_ANCHORS, str(WORKFLOW))
-        for anchor in self.CI_SETUP_ORDER:
-            with self.subTest(job_anchor=anchor):
-                tampered = job.replace(anchor, TAMPER_TOKEN)
-                self.assertNotEqual(job, tampered)
-                with self.assertRaises(AssertionError):
-                    require_anchors(tampered, self.CI_SETUP_ORDER, "release-bundle job")
-
-    def test_acceptance_script_preserves_extracted_artifact_contract(self) -> None:
-        self._require_with_mutation(BUNDLE_ACCEPTANCE, self.SCRIPT_ANCHORS)
-
-    def test_builder_and_verifier_preserve_release_exclusions(self) -> None:
-        self._require_with_mutation(BUNDLE_BUILDER, self.BUILDER_EXCLUSION_ANCHORS)
-        self._require_with_mutation(BUNDLE_VERIFIER, self.VERIFIER_EXCLUSION_ANCHORS)
-
-    def test_readme_documents_bundle_without_public_release_overclaim(self) -> None:
-        self._require_with_mutation(README, self.README_ANCHORS)
-
-    def test_verification_documents_canonical_bundle_command(self) -> None:
-        self._require_with_mutation(VERIFICATION_MD, self.VERIFICATION_ANCHORS)
-
-    def test_readiness_records_local_evidence_and_public_followup(self) -> None:
-        self._require_with_mutation(RELEASE_READINESS, self.READINESS_ANCHORS)
-
-    def test_changelog_distinguishes_local_evidence_from_public_release(self) -> None:
-        changelog = CHANGELOG_MD.read_text(encoding="utf-8")
-        limitations = changelog.split("### Known open limitations", 1)[1]
-        require_anchors(
-            limitations,
-            self.CHANGELOG_LIMITATION_ANCHORS,
-            "CHANGELOG known limitations",
+    def test_release_policy_file_is_present(self) -> None:
+        self.assertTrue(
+            RELEASE_POLICY_MD.is_file(), "missing docs/release-policy.md"
         )
-        for anchor in self.CHANGELOG_LIMITATION_ANCHORS:
-            with self.subTest(anchor=anchor):
-                tampered = limitations.replace(anchor, TAMPER_TOKEN)
-                self.assertNotEqual(limitations, tampered)
+
+    def test_release_policy_preserves_required_anchors(self) -> None:
+        self._require_with_mutation(RELEASE_POLICY_MD, self.REQUIRED_ANCHORS)
+
+    def test_release_policy_makes_no_production_or_publication_overclaim(self) -> None:
+        text = RELEASE_POLICY_MD.read_text(encoding="utf-8")
+        forbid_phrases(text, self.FORBIDDEN_OVERCLAIM_PHRASES, str(RELEASE_POLICY_MD))
+        for phrase in self.FORBIDDEN_OVERCLAIM_PHRASES:
+            with self.subTest(phrase=phrase):
                 with self.assertRaises(AssertionError):
-                    require_anchors(
-                        tampered,
-                        self.CHANGELOG_LIMITATION_ANCHORS,
-                        "CHANGELOG known limitations",
-                    )
-
-    def test_architecture_distinguishes_local_evidence_from_public_release(self) -> None:
-        self._require_with_mutation(ARCHITECTURE, self.ARCHITECTURE_BUNDLE_ANCHORS)
-
-    def test_bundle_cleanup_preserves_term_status_after_rm_command_failure(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="tracehelix-cleanup-test-") as temp:
-            root = Path(temp)
-            fakebin = root / "fakebin"
-            tmpdir = root / "tmp"
-            fakebin.mkdir()
-            tmpdir.mkdir()
-            rm_state = root / "rm-failed-once"
-
-            fake_python = fakebin / "python3"
-            fake_python.write_text(
-                "#!/usr/bin/env bash\nexec /bin/sleep 30\n", encoding="utf-8"
-            )
-            fake_docker = fakebin / "docker"
-            fake_docker.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-            fake_rm = fakebin / "rm"
-            fake_rm.write_text(
-                "#!/usr/bin/env bash\n"
-                ": >\"$TRACEHELIX_RM_FAIL_STATE\"\n"
-                "exit 77\n",
-                encoding="utf-8",
-            )
-            for executable in (fake_python, fake_docker, fake_rm):
-                executable.chmod(0o755)
-
-            env = os.environ.copy()
-            env["PATH"] = f"{fakebin}:{env['PATH']}"
-            env["TMPDIR"] = str(tmpdir)
-            env["TRACEHELIX_RM_FAIL_STATE"] = str(rm_state)
-            process = subprocess.Popen(
-                ["bash", str(BUNDLE_ACCEPTANCE)],
-                cwd=ROOT,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                start_new_session=True,
-            )
-            try:
-                deadline = time.monotonic() + 5
-                while not list(tmpdir.glob("tracehelix-release-bundle-*")):
-                    if process.poll() is not None:
-                        self.fail(f"bundle verifier exited before TERM: {process.returncode}")
-                    if time.monotonic() >= deadline:
-                        self.fail("bundle verifier did not create its private work directory")
-                    time.sleep(0.05)
-                os.killpg(process.pid, signal.SIGTERM)
-                stdout, stderr = process.communicate(timeout=10)
-            finally:
-                if process.poll() is None:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait(timeout=5)
-
-            self.assertTrue(rm_state.is_file(), "the injected rm failure did not run")
-            self.assertEqual(143, process.returncode, stderr)
-            self.assertEqual([], list(tmpdir.glob("tracehelix-release-bundle-*")))
-            self.assertEqual("", stdout)
-
-    def test_compose_lifecycle_teardown_is_fail_closed(self) -> None:
-        self._require_with_mutation(
-            COMPOSE_LIFECYCLE, self.COMPOSE_LIFECYCLE_TEARDOWN_ANCHORS
-        )
+                    forbid_phrases(text + phrase, self.FORBIDDEN_OVERCLAIM_PHRASES, str(RELEASE_POLICY_MD))
 
 
 if __name__ == "__main__":

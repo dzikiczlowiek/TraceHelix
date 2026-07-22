@@ -70,5 +70,7 @@ source release and is not a release announcement.
 - Not a network, multi-user, or SaaS service; do not reverse-proxy or expose it.
 - No upload, arbitrary file browsing, live AI/ML, or ONNX inference. Browser
   acceptance and local install-from-artifact evidence exercise the source-built
-  Compose topology, but there is no published release bundle, tag, release
-  workflow, downloaded-public-artifact verification, or signing evidence.
+  Compose topology. A fail-closed tag-only release workflow is present, but
+  there is no published release bundle or tag,
+  downloaded-public-artifact verification, provenance attestation, or signing
+  evidence yet.

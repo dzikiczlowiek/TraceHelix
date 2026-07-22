@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK=""
+VERIFIED_OUTPUT_DIR=${TRACEHELIX_VERIFIED_OUTPUT_DIR:-}
 
 note() { printf 'verify-release-bundle: %s\n' "$*" >&2; }
 die() { note "ERROR: $*"; exit 1; }
@@ -23,6 +24,22 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT INT TERM
+
+export_verified_output() {
+  local destination
+  [[ -n "$VERIFIED_OUTPUT_DIR" ]] || return 0
+  destination=$VERIFIED_OUTPUT_DIR
+  [[ "$destination" = /* ]] || die "destination must be an absolute path"
+  python3 "$ROOT/scripts/release_assets.py" export-verified \
+    --archive "$OUT_A/$ARCHIVE" \
+    --checksums "$OUT_A/SHA256SUMS" \
+    --manifest "$SOURCE/RELEASE-MANIFEST.json" \
+    --version "$VERSION" \
+    --destination "$destination" \
+    --forbidden-root "$ROOT" \
+    --forbidden-root "$WORK"
+  note "exported verified archive, checksum, and extracted manifest to $destination"
+}
 
 for command in python3 git cmp sha256sum docker node npm find; do
   have "$command" || die "$command is required"
@@ -95,6 +112,11 @@ note "running browser acceptance from extracted source"
   cd "$SOURCE"
   bash scripts/verify-browser.sh
 )
+
+# Export is deliberately last: no caller receives artifacts until both builds,
+# strict archive verification, extracted policy tests, installation, image build,
+# lifecycle, and browser acceptance have completed successfully.
+export_verified_output
 
 DIGEST=$(sha256sum "$OUT_A/$ARCHIVE" | cut -d' ' -f1)
 note "PASS archive=$ARCHIVE sha256=$DIGEST source=$SOURCE"

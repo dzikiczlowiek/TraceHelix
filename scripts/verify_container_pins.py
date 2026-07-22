@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Fail unless Docker image and CI action/tool references match approved pins."""
+"""Fail unless Docker image and CI/release action/tool references match approved pins.
+
+Both ``.github/workflows/ci.yml`` and ``.github/workflows/release.yml`` are checked
+against their own exact ordered full-SHA action allowlists and exact runtime/tool
+pin line counts, with the same fail-closed rules: every ``uses`` key must be a
+canonical plain mapping key referencing an approved immutable
+commit SHA, no YAML escape sequences are allowed, and no runner/runtime selector
+may use a mutable ``latest`` label. The summary explicitly reports the release
+workflow action coverage.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +20,8 @@ import shlex
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = ROOT / "Dockerfile"
-WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 EXPECTED_SYNTAX = (
     "docker/dockerfile:1.7@sha256:"
     "a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e"
@@ -22,7 +32,7 @@ EXPECTED_EXTERNAL_IMAGES = [
     "node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd",
     "nginxinc/nginx-unprivileged:stable-alpine@sha256:dcea25a6593307a74b09e59a47f8695c4d56943750e45add532ae0bf8b24bfd6",
 ]
-EXPECTED_ACTIONS = [
+EXPECTED_CI_ACTIONS = [
     "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
     "actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d",
     "astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244",
@@ -43,9 +53,46 @@ EXPECTED_ACTIONS = [
     "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
     "astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244",
 ]
+# Exact ordered full-SHA action allowlist for the release workflow. Every entry
+# is a full-length immutable commit SHA; mutable tags (@vN) are forbidden.
+EXPECTED_RELEASE_ACTIONS = [
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d",
+    "astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d",
+    "actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11",
+    "anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11",
+    "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25",
+    "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903",
+    "anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11",
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be",
+]
 EXPECTED_CI_LINES = Counter(
     {
         "os: [ubuntu-24.04, macos-15, windows-2025]": 1,
+        "runs-on: ${{ matrix.os }}": 1,
         "runs-on: ubuntu-24.04": 6,
         "version: 0.11.29": 2,
         "python-version: '3.11.15'": 2,
@@ -54,12 +101,26 @@ EXPECTED_CI_LINES = Counter(
         "node-version: 24.18.0": 3,
     }
 )
+EXPECTED_RELEASE_LINES = Counter(
+    {
+        "runs-on: ubuntu-24.04": 11,
+        "version: 0.11.29": 2,
+        "python-version: '3.11.15'": 2,
+        "syft-version: v1.42.3": 3,
+        "version: v0.72.0": 2,
+        "node-version: 24.18.0": 3,
+    }
+)
 SYNTAX = re.compile(r"^#\s*syntax=(?P<reference>\S+)\s*$", re.IGNORECASE)
 USES = re.compile(
-    r"(?<![A-Za-z0-9_])(?P<quote>[\"']?)uses(?P=quote)\s*:\s*(?P<reference>[^\s,}\]]+)",
+    r"^\s*uses:\s*(?P<reference>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[^\s#]+)\s*(?:#.*)?$"
 )
 USES_TOKEN = re.compile(r"(?<![A-Za-z0-9_])uses(?![A-Za-z0-9_])")
 YAML_ESCAPE = re.compile(r"\\(?:u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|x[0-9a-fA-F]{2})")
+SELECTOR_LINE = re.compile(
+    r"^(?:\s*(?:runs-on|node-version|python-version|syft-version|os):|\s{10}version:)\s*[^#\n]+?(?:\s+#.*)?$"
+)
+FULL_SHA_ACTION = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$")
 
 
 def logical_instructions(lines: list[str]) -> list[tuple[int, str]]:
@@ -185,49 +246,83 @@ def verify_dockerfile(failures: list[str]) -> tuple[int, int]:
     return len(external_images), stage_references
 
 
-def verify_workflow(failures: list[str]) -> int:
-    workflow = WORKFLOW.read_text(encoding="utf-8")
+def verify_workflow(
+    path: Path,
+    expected_actions: list[str],
+    expected_lines: Counter,
+    label: str,
+    failures: list[str],
+) -> int:
+    """Verify one workflow against its exact ordered action and line allowlist.
+
+    Applies the same fail-closed rules to ``ci.yml`` and ``release.yml``: every
+    ``uses`` must be a canonical plain mapping key, no YAML
+    escape sequences, no mutable runner/runtime ``latest`` labels, and the
+    ordered action references and exact pin-line counts must match exactly.
+    """
+    if not path.is_file():
+        failures.append(f"{path.name}: required workflow is missing")
+        return 0
+    workflow = path.read_text(encoding="utf-8")
     actual_actions: list[str] = []
     for line_number, line in enumerate(workflow.splitlines(), start=1):
         code = line.split("#", 1)[0]
         if YAML_ESCAPE.search(code):
             failures.append(
-                f"ci.yml:{line_number}: YAML escape sequences are forbidden by the canonical workflow policy."
+                f"{path.name}:{line_number}: YAML escape sequences are forbidden by the canonical workflow policy."
             )
-        matches = list(USES.finditer(code))
+        match = USES.fullmatch(code)
         token_count = len(USES_TOKEN.findall(code))
-        if len(matches) != token_count:
+        if match is None and token_count:
             failures.append(
-                f"ci.yml:{line_number}: unsupported uses key syntax; use a canonical plain or quoted mapping key."
+                f"{path.name}:{line_number}: unsupported uses key syntax; use only a canonical plain '- uses:' action step."
             )
-        actual_actions.extend(match.group("reference") for match in matches)
-    if actual_actions != EXPECTED_ACTIONS:
+        if match is not None:
+            actual_actions.append(match.group("reference"))
+    if actual_actions != expected_actions:
         failures.append(
-            "CI action references differ from the approved ordered SHA allowlist.\n"
-            f"Expected: {EXPECTED_ACTIONS}\nActual:   {actual_actions}"
+            f"{label} action references differ from the approved ordered SHA allowlist.\n"
+            f"Expected: {expected_actions}\nActual:   {actual_actions}"
         )
-    stripped_lines = Counter(line.strip() for line in workflow.splitlines())
-    for line, expected_count in EXPECTED_CI_LINES.items():
-        actual_count = stripped_lines[line]
-        if actual_count != expected_count:
+    selector_lines = Counter(
+        line.strip()
+        for line in workflow.splitlines()
+        if SELECTOR_LINE.fullmatch(line.split("#", 1)[0])
+    )
+    if selector_lines != expected_lines:
+        failures.append(
+            f"{path.name} runtime/tool selectors differ from the approved exact allowlist.\n"
+            f"Expected: {expected_lines}\nActual:   {selector_lines}"
+        )
+    for reference in actual_actions:
+        if FULL_SHA_ACTION.fullmatch(reference) is None:
             failures.append(
-                f"CI exact pin line {line!r} must occur {expected_count} time(s); found {actual_count}."
+                f"{path.name}: action reference is not an immutable full commit SHA: {reference}"
             )
-    if re.search(r"(?:runs-on:|node-version:|python-version:)\s*[^#\n]*latest", workflow):
-        failures.append("CI runner and runtime selectors must not use mutable 'latest' labels.")
     return len(actual_actions)
 
 
 def main() -> None:
     failures: list[str] = []
     image_count, stage_reference_count = verify_dockerfile(failures)
-    action_count = verify_workflow(failures)
+    ci_action_count = verify_workflow(
+        CI_WORKFLOW, EXPECTED_CI_ACTIONS, EXPECTED_CI_LINES, "CI", failures
+    )
+    release_action_count = verify_workflow(
+        RELEASE_WORKFLOW,
+        EXPECTED_RELEASE_ACTIONS,
+        EXPECTED_RELEASE_LINES,
+        "Release",
+        failures,
+    )
     if failures:
         raise SystemExit("\n".join(failures))
     print(
         "Dependency pin verification passed "
         f"(1 syntax frontend, {image_count} external images, "
-        f"{stage_reference_count} stage references, {action_count} CI actions)."
+        f"{stage_reference_count} stage references, "
+        f"{ci_action_count} CI actions, "
+        f"{release_action_count} release actions)."
     )
 
 
