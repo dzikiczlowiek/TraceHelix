@@ -1207,6 +1207,24 @@ class BrowserAcceptanceGuardTests(unittest.TestCase):
 class WorkflowContractGuardTests(unittest.TestCase):
     """Execute the strict parsed-workflow contract, not textual workflow scans."""
 
+    def _run_contract_cli_with_ci(self, ci: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory(prefix="tracehelix-workflow-contract-") as tmp:
+            root = Path(tmp)
+            scripts = root / "scripts"
+            workflows = root / ".github" / "workflows"
+            scripts.mkdir()
+            workflows.mkdir(parents=True)
+            shutil.copy2(ROOT / "scripts" / "workflow_contract.py", scripts)
+            (workflows / "ci.yml").write_text(ci, encoding="utf-8")
+            shutil.copy2(RELEASE_WORKFLOW, workflows / "release.yml")
+            return subprocess.run(
+                ["python3", str(scripts / "workflow_contract.py")],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
     def test_repository_workflow_contract(self) -> None:
         result = subprocess.run(
             ["python3", str(ROOT / "scripts" / "workflow_contract.py")],
@@ -1244,27 +1262,10 @@ class WorkflowContractGuardTests(unittest.TestCase):
         )
 
     def test_workflow_contract_cli_rejects_lone_surrogate_without_traceback(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="tracehelix-workflow-surrogate-") as tmp:
-            root = Path(tmp)
-            scripts = root / "scripts"
-            workflows = root / ".github" / "workflows"
-            scripts.mkdir()
-            workflows.mkdir(parents=True)
-            shutil.copy2(ROOT / "scripts" / "workflow_contract.py", scripts)
-            ci = WORKFLOW.read_text(encoding="utf-8").replace(
-                "name: CI", 'name: "\\ud83d evil"', 1
-            )
-            self.assertNotEqual(WORKFLOW.read_text(encoding="utf-8"), ci)
-            (workflows / "ci.yml").write_text(ci, encoding="utf-8")
-            shutil.copy2(RELEASE_WORKFLOW, workflows / "release.yml")
-
-            result = subprocess.run(
-                ["python3", str(scripts / "workflow_contract.py")],
-                cwd=root,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+        original = WORKFLOW.read_text(encoding="utf-8")
+        ci = original.replace("name: CI", 'name: "\\ud83d evil"', 1)
+        self.assertNotEqual(original, ci)
+        result = self._run_contract_cli_with_ci(ci)
 
         self.assertEqual(1, result.returncode, result.stdout + result.stderr)
         self.assertEqual("", result.stdout)
@@ -1272,6 +1273,20 @@ class WorkflowContractGuardTests(unittest.TestCase):
         self.assertIn("workflow semantics are not hashable", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertNotIn("UnicodeEncodeError", result.stderr)
+
+    def test_workflow_contract_cli_rejects_deep_nesting_without_traceback(self) -> None:
+        depth = 700
+        ci = "name: CI\non:\n" + "".join(
+            "  " * level + f"k{level}:\n" for level in range(1, depth + 1)
+        )
+        ci += "  " * (depth + 1) + "leaf: value\n"
+        result = self._run_contract_cli_with_ci(ci)
+
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertEqual("", result.stdout)
+        self.assertIn("workflow_contract: invalid workflow YAML", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotIn("RecursionError", result.stderr)
 
     def test_strict_loader_rejects_duplicate_keys_at_any_mapping_depth(self) -> None:
         import workflow_contract

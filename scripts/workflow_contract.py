@@ -55,7 +55,7 @@ StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _ma
 def load_strict(text: str) -> dict[str, Any]:
     try:
         value = yaml.load(text, Loader=StrictLoader)
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, RecursionError) as exc:
         raise WorkflowContractError(f"invalid workflow YAML: {exc}") from exc
     if not isinstance(value, dict):
         raise WorkflowContractError("workflow root must be a mapping")
@@ -113,7 +113,7 @@ def semantic_digest(data: dict[str, Any]) -> str:
             separators=(",", ":"),
             ensure_ascii=False,
         ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise WorkflowContractError(f"workflow semantics are not hashable: {exc}") from exc
     return hashlib.sha256(encoded).hexdigest()
 
